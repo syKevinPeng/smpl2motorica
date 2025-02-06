@@ -1,3 +1,5 @@
+# Generate Stick figure videos from the motorica dataset
+
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
