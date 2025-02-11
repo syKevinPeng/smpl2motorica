@@ -239,3 +239,19 @@ if __name__ == "__main__":
         # get the SMPL joints (first 23 joints)
         smpl_joints = smpl_joints_loc[:, :23, :]
         print(smpl_joints.shape)
+
+        # Convert SMPL to Motorica Keypoint
+        expanded_smpl_joint_names = expand_skeleton(get_SMPL_skeleton_names())
+        smpl_joints_df = pd.DataFrame(smpl_body_pose, columns=expanded_smpl_joint_names)
+        # get in motorica joint order
+        motorica_joint_names = expand_skeleton(smpl2motorica())
+
+        # reorder the columns
+        keypoint_smpl_df = smpl_joints_df[motorica_joint_names]
+        # convert from radian to degree and keep the same order
+        keypoint_smpl_df = keypoint_smpl_df.apply(np.rad2deg)
+        # rename the columns to motorica joint names
+        keypoint_smpl_df.columns = expand_skeleton(get_motorica_skeleton_names())
+        root_pos_df = pd.DataFrame(
+            root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]
+        )
