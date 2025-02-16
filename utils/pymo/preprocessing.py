@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 # chech if the path is correct
-path = Path(r"C:\Users\siyuan\research\smpl2motorica\utils")
+path = Path(r"/fs/nexus-projects/PhysicsFall/smpl2motorica/utils")
 if not path.exists():
     print(f"Path {path} does not exist")
 sys.path.append(str(path))

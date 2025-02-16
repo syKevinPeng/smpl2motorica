@@ -233,12 +233,41 @@ def skeleton_scaler(skeleton, ratio):
     return skeleton
 
 
+def load_dummy_motorica_data():
+    motorica_data_root = Path(
+        "/fs/nexus-projects/PhysicsFall/data/motorica_dance_dataset"
+    )
+    motorica_motion_path = (
+        motorica_data_root
+        / "bvh"
+        / "kthjazz_gCH_sFM_cAll_d02_mCH_ch01_beatlestreetwashboardbandfortyandtight_003.bvh"
+    )
+    if not motorica_motion_path.exists():
+        raise FileNotFoundError(f"Motion file {motorica_motion_path} does not exist.")
+    bvh_parser = BVHParser()
+    motorica_dummy_data = bvh_parser.parse(motorica_motion_path)
+    # scale the skeleton
+    ratio = 0.01
+    motorica_dummy_data.skeleton = skeleton_scaler(motorica_dummy_data.skeleton, ratio)
+    return motorica_dummy_data
+
+
+def motorica_forward_kinematics(data_df):
+    motorica_dummy_data = load_dummy_motorica_data()
+    motorica_dummy_data.values = data_df
+    position_mocap = MocapParameterizer("position").fit_transform(
+        [motorica_dummy_data]
+    )[0]
+    position_df = position_mocap.values
+    return position_df, motorica_dummy_data
+
+
 if __name__ == "__main__":
     dataset_fps = 60
-    target_fps = 6
+    target_fps = 30
     debug = False  # debug flag
-    aist_data_root = Path("./data/AIST++/")
-    smpl_model_path = Path("./smpl/models")
+    aist_data_root = Path("/fs/nexus-projects/PhysicsFall/data/AIST++/motions-SMPL")
+    smpl_model_path = Path("/fs/nexus-projects/PhysicsFall/data/smpl/models")
     output_dir = Path("./data/alignment_dataset")
 
     if not aist_data_root.exists():
@@ -249,22 +278,6 @@ if __name__ == "__main__":
         sys.exit(1)
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
-
-    # load dummy motorica data
-    motorica_data_root = Path("./data/motorica_dance_dataset")
-    motorica_motion_path = (
-        motorica_data_root
-        / "bvh"
-        / "kthjazz_gCH_sFM_cAll_d02_mCH_ch01_beatlestreetwashboardbandfortyandtight_003.bvh"
-    )
-    if not motorica_motion_path.exists():
-        raise FileNotFoundError(f"Motion file {motorica_motion_path} does not exist. ")
-    bvh_parser = BVHParser()
-    motorica_dummy_data = bvh_parser.parse(motorica_motion_path)
-
-    # scale the skeleton
-    ratio = 0.01
-    motorica_dummy_data.skeleton = skeleton_scaler(motorica_dummy_data.skeleton, ratio)
 
     # load all aist data *.pkl files
     aist_data = list(aist_data_root.glob("*.pkl"))
@@ -410,7 +423,6 @@ if __name__ == "__main__":
             "smpl_body_pose": smpl_body_pose,
             "smpl_transl": rotated_root_trans,
             "smpl_global_orient": rotated_smpl_root_rot,
-            "smpl_model": smpl_model,
             "smpl_joint_loc": smpl_joints,
         }
 
@@ -422,11 +434,12 @@ if __name__ == "__main__":
 
         # TODO visualize a frame
         if debug:
-            motorica_dummy_data.values = new_df
-            position_mocap = MocapParameterizer("position").fit_transform(
-                [motorica_dummy_data]
-            )[0]
-            position_df = position_mocap.values
+            # motorica_dummy_data.values = new_df
+            # position_mocap = MocapParameterizer("position").fit_transform(
+            #     [motorica_dummy_data]
+            # )[0]
+            # position_df = position_mocap.values
+            position_df, motorica_dummy_data = motorica_forward_kinematics(new_df)
 
             vis_frame = 0
             fig = plt.figure(figsize=(20, 10))
