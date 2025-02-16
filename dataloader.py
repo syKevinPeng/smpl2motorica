@@ -9,7 +9,14 @@ import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 from smpl2motorica.utils import conti_angle_rep
-from smpl2keypoint import motorica_draw_stickfigure3d, SMPL_visulize_a_frame, motorica_forward_kinematics
+from tqdm import tqdm
+from smpl2keypoint import (
+    motorica_draw_stickfigure3d,
+    SMPL_visulize_a_frame,
+    motorica_forward_kinematics,
+    get_SMPL_skeleton_names,
+    expand_skeleton,
+)
 
 # class SMPLDataset(Dataset):
 #     def __init__(self, data_dir):
@@ -56,24 +63,86 @@ from smpl2keypoint import motorica_draw_stickfigure3d, SMPL_visulize_a_frame, mo
 #         return data_mat, col_name
 
 class AlignmentDataset(Dataset):
-    def __init__(self, data_dir, segment_length=10):
+    def __init__(self, data_dir, segment_length=50, force_reprocess=False):
         self.data_dir = Path(data_dir)
         self.smpl_files = sorted(list(self.data_dir.glob("*_smpl.pkl")))
         self.keypoint_files = sorted(list(self.data_dir.glob("*_motorica.pkl")))
+        self.segment_length = segment_length
+        self.processed_file_save_path = (
+            self.data_dir / f"processed_data_{segment_length}_length.pkl"
+        )
+        if self.processed_file_save_path.exists() and not force_reprocess:
+            print("Loading preprocessed data from pickle")
+            self.all_data = pd.read_pickle(self.processed_file_save_path)
+        else:
+            print("No preprocessed data found or force reprocess is set to True")
+            print("Preprocessing data")
+            self.all_data = self.preprocess_data()
+            self.save_all_data(self.processed_file_save_path)
 
     def __len__(self):
-        return len(self.smpl_files)
+        return len(self.all_data) // self.segment_length
 
     def __getitem__(self, idx):
-        smpl_file = self.smpl_files[idx]
+        # consider the segment length
+        start_idx = idx * self.segment_length
+        end_idx = (idx + 1) * self.segment_length
+        data = self.all_data.iloc[start_idx:end_idx]
+
+        # smpl col
+        smpl_col = [col for col in data.columns if "smpl" in col]
+        # keypoint col
+        keypoint_col = [col for col in data.columns if "keypoint" in col]
+
+        smpl_df = data[smpl_col]
+        keypoint_df = data[keypoint_col]
+
+        # processing smpl data
+        smpl_dict = {
+            "smpl_body_pose": smpl_df[
+                [
+                    "smpl_" + name
+                    for name in expand_skeleton(get_SMPL_skeleton_names()[1:])
+                ]
+            ].values,
+            "smpl_transl": smpl_df[
+                ["smpl_transl_x", "smpl_transl_y", "smpl_transl_z"]
+            ].values,
+            "smpl_global_orient": smpl_df[
+                [
+                    "smpl_global_orient_x",
+                    "smpl_global_orient_y",
+                    "smpl_global_orient_z",
+                ]
+            ].values,
+        }
+
+        # processing keypoint data
+        # keypoint_data = torch.tensor(
+        #     keypoint_df.values, dtype=torch.float32
+        # )  # data shape (num_frames, num_keypoints x 3)
+        # # convert degree to radian
+        # keypoint_data = torch.deg2rad(keypoint_data)
+
+        # # data shape (num_frames, num_keypoints, 3)
+        # reshaped_euler: torch.Tensor = keypoint_data.reshape(
+        #     keypoint_data.shape[0], -1, 3
+        # )
+        # # convert to matrix representation
+        # keypoint_data_mat = conti_angle_rep.euler_angles_to_matrix(
+        #     reshaped_euler, convention="XYZ"
+        # )
+        return keypoint_df, smpl_dict
+
+    def preprocess_one_pair(self, file_path):
         # find corresponding keypoint file
-        file_name = smpl_file.stem
+        file_name = file_path.stem
         # replace _smpl.pkl with _motorica.pkl
         keypoint_file = self.data_dir / (file_name.replace("_smpl", "_motorica") + ".pkl")
         if not keypoint_file.exists():
             raise FileNotFoundError(f"Keypoint file {keypoint_file} not found")
-        
-        with open(smpl_file, "rb") as f:
+
+        with open(file_path, "rb") as f:
             smpl_data = pickle.load(f)
         with open(keypoint_file, "rb") as f:
             keypoint_data = pickle.load(f)
@@ -83,17 +152,49 @@ class AlignmentDataset(Dataset):
             "smpl_global_orient": smpl_data["smpl_global_orient"],
             "smpl_joint_loc": smpl_data["smpl_joint_loc"],
         }
-        col_name = keypoint_data.columns
-        keypoint_data = torch.tensor(keypoint_data.values, dtype=torch.float32) # data shape (num_frames, num_keypoints x 3)
-        # convert degree to radian
-        keypoint_data = torch.deg2rad(keypoint_data)
+        # convert dict into a dataframe
+        smpl_body_pose_df = pd.DataFrame(
+            smpl_dict["smpl_body_pose"],
+            columns=[
+                "smpl_" + name
+                for name in expand_skeleton(get_SMPL_skeleton_names()[1:])
+            ],
+        )
+        smpl_transl_df = pd.DataFrame(
+            smpl_dict["smpl_transl"],
+            columns=["smpl_transl_x", "smpl_transl_y", "smpl_transl_z"],
+        )
+        smpl_global_orient_df = pd.DataFrame(
+            smpl_dict["smpl_global_orient"],
+            columns=[
+                "smpl_global_orient_x",
+                "smpl_global_orient_y",
+                "smpl_global_orient_z",
+            ],
+        )
+        smpl_df = pd.concat(
+            [smpl_body_pose_df, smpl_transl_df, smpl_global_orient_df], axis=1
+        )
 
-        # data shape (num_frames, num_keypoints, 3)
-        reshaped_euler: torch.Tensor = keypoint_data.reshape(keypoint_data.shape[0], -1, 3)
-        # convert to matrix representation
-        keypoint_data_mat = conti_angle_rep.euler_angles_to_matrix(reshaped_euler, convention="XYZ")
+        keypoint_data.columns = ["keypoint_" + name for name in keypoint_data.columns]
+        combined_df = pd.concat([keypoint_data, smpl_df], axis=1)
 
-        return keypoint_data_mat, col_name, smpl_dict
+        # col_name = keypoint_data.columns
+
+        return combined_df
+
+    def preprocess_data(
+        self,
+    ):
+        all_data = []
+        for i in tqdm(range(len(self.smpl_files)), desc="Processing files"):
+            combined_df = self.preprocess_one_pair(self.smpl_files[i])
+            all_data.append(combined_df)
+        return pd.concat(all_data, ignore_index=True)
+
+    def save_all_data(self, save_path):
+        self.all_data.to_pickle(save_path)
+
 
 class AlignmentDataModule(pl.LightningDataModule):
     def __init__(self, data_dir, batch_size, num_workers):
@@ -121,25 +222,27 @@ def main():
         raise FileNotFoundError(f"Data directory {data_dir} not found")
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
-    batch_size = 1
-    num_workers = 1
 
-    alignment_data = AlignmentDataset(data_dir)
+    alignment_data = AlignmentDataset(
+        data_dir, segment_length=50, force_reprocess=False
+    )
+    # save all the data in a pickle file
+    # for i in range(len(alignment_data)):
+    #     keypoint_batch, keypoint_col_name, smpl_batch = alignment_data[i]
 
-
-    keypoint_batch, keypoint_col_name, smpl_batch = alignment_data[0] #keypoint_batch shape (num_frames, num_keypoints, 3, 3)
-    # convert from matrix to euler angles
-    keypoint_batch = conti_angle_rep.matrix_to_euler_angles(keypoint_batch, convention="XYZ")
-    # reshape back to (num_frames, num_keypoints x 3)
-    keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
-    # rad to degree
-    keypoint_batch = torch.rad2deg(keypoint_batch)
+    # # For visualization and testing
+    keypoint_batch, smpl_batch = alignment_data[0]
+    # # convert from matrix to euler angles
+    # keypoint_batch = conti_angle_rep.matrix_to_euler_angles(keypoint_batch, convention="XYZ")
+    # # reshape back to (num_frames, num_keypoints x 3)
+    # keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
+    # # rad to degree
+    # keypoint_batch = torch.rad2deg(keypoint_batch)
 
     # processing SMPL data
     pose = smpl_batch["smpl_body_pose"]
     transl = smpl_batch["smpl_transl"]
     global_orient = smpl_batch["smpl_global_orient"]
-    smpl_joint_loc = smpl_batch["smpl_joint_loc"]
 
     smpl_model = smplx.create(
         model_path=smpl_model_path,
@@ -155,16 +258,22 @@ def main():
     smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
     smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
     smpl_joints_loc = smpl_joints_loc[:, :24, :]
-    
+
     # processing motorica data
-    keypoint_df = pd.DataFrame(keypoint_batch, columns=keypoint_col_name)
-    position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_df)
+    keypoint_col_name = keypoint_batch.columns
+    # remove "smpl_" prefix
+    keypoint_col_name = [col.replace("keypoint_", "") for col in keypoint_col_name]
+    keypoint_batch.columns = keypoint_col_name
+    print(keypoint_batch.head(1))
+    position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_batch)
 
     # frame to visualize
     frame = 0
     fig = plt.figure(figsize=(15, 10))
     smpl_ax = fig.add_subplot(121, projection="3d")
-    smpl_ax = SMPL_visulize_a_frame(smpl_ax, smpl_joints_loc[frame], smpl_vertices[frame], smpl_model)
+    smpl_ax = SMPL_visulize_a_frame(
+        smpl_ax, smpl_joints_loc[frame], smpl_vertices[frame], smpl_model
+    )
     smpl_ax.set_title("SMPL joints")
 
     ax_motorica = fig.add_subplot(122, projection="3d")
@@ -172,7 +281,6 @@ def main():
         ax_motorica, motorica_dummy_data, frame, data=position_df
     )
     ax_motorica.set_title("Motorica")
-
 
     plt.savefig("dataloader_testing_fig.png")
 
