@@ -116,25 +116,36 @@ class AlignmentDataset(Dataset):
                 ]
             ].values,
         }
-
-        # processing keypoint data
-        # keypoint_data = torch.tensor(
-        #     keypoint_df.values, dtype=torch.float32
-        # )  # data shape (num_frames, num_keypoints x 3)
-        # # convert degree to radian
-        # keypoint_data = torch.deg2rad(keypoint_data)
-
-        # # data shape (num_frames, num_keypoints, 3)
-        # reshaped_euler: torch.Tensor = keypoint_data.reshape(
-        #     keypoint_data.shape[0], -1, 3
-        # )
-        # # convert to matrix representation
-        # keypoint_data_mat = conti_angle_rep.euler_angles_to_matrix(
-        #     reshaped_euler, convention="XYZ"
-        # )
         return keypoint_df, smpl_dict
 
     def preprocess_one_pair(self, file_path):
+        """
+        Preprocess a single pair of SMPL and Motorica data files.
+
+        This function takes the file path of an SMPL data file, finds the corresponding
+        Motorica keypoint file, loads both files, processes the data, and combines them
+        into a single DataFrame.
+
+        Parameters:
+        file_path (Path): The file path of the SMPL data file.
+
+        Returns:
+        DataFrame: A pandas DataFrame containing the combined SMPL and Motorica keypoint data.
+
+        Raises:
+        FileNotFoundError: If the corresponding Motorica keypoint file is not found.
+
+        Notes:
+        - The SMPL data file is expected to contain the following keys:
+            - "smpl_body_pose"
+            - "smpl_transl"
+            - "smpl_global_orient"
+            - "smpl_joint_loc"
+        - The Motorica keypoint file is expected to be in the same directory as the SMPL data file,
+          with the same name but with "_smpl" replaced by "_motorica" in the filename.
+        - The resulting DataFrame will have columns prefixed with "smpl_" for SMPL data and "keypoint_"
+          for Motorica keypoint data.
+        """
         # find corresponding keypoint file
         file_name = file_path.stem
         # replace _smpl.pkl with _motorica.pkl
@@ -186,6 +197,16 @@ class AlignmentDataset(Dataset):
     def preprocess_data(
         self,
     ):
+        """
+        Preprocesses data by iterating over SMPL files and combining the processed data.
+
+        This method processes each SMPL file in the `self.smpl_files` list by calling the
+        `preprocess_one_pair` method on each file. The processed data from each file is
+        then appended to a list, which is concatenated into a single DataFrame and returned.
+
+        Returns:
+            pd.DataFrame: A concatenated DataFrame containing the processed data from all SMPL files.
+        """
         all_data = []
         for i in tqdm(range(len(self.smpl_files)), desc="Processing files"):
             combined_df = self.preprocess_one_pair(self.smpl_files[i])
@@ -202,9 +223,42 @@ class AlignmentDataModule(pl.LightningDataModule):
         self.data_dir = Path(data_dir)
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.setup()
 
     def setup(self, stage=None):
         self.dataset = AlignmentDataset(self.data_dir)
+
+    def collate_fn(self, batch):
+        # keypoint is a dataframe and smpl is a dict
+        keypoint_df_batch, smpl_dict_batch = zip(*batch)
+        keypoint_df_batch = pd.concat(keypoint_df_batch, ignore_index=True)
+        # for each key in the dict, stack the values
+        smpl_body_pose = torch.stack(
+            [
+                torch.tensor(item["smpl_body_pose"], dtype=torch.float32)
+                for item in smpl_dict_batch
+            ]
+        )
+        smpl_transl = torch.stack(
+            [
+                torch.tensor(item["smpl_transl"], dtype=torch.float32)
+                for item in smpl_dict_batch
+            ]
+        )
+        smpl_global_orient = torch.stack(
+            [
+                torch.tensor(item["smpl_global_orient"], dtype=torch.float32)
+                for item in smpl_dict_batch
+            ]
+        )
+
+        smpl_dict_batch = {
+            "smpl_body_pose": smpl_body_pose,
+            "smpl_transl": smpl_transl,
+            "smpl_global_orient": smpl_global_orient,
+        }
+
+        return keypoint_df_batch, smpl_dict_batch
 
     def train_dataloader(self):
         return DataLoader(
@@ -212,6 +266,7 @@ class AlignmentDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
         )
     
 
@@ -264,7 +319,6 @@ def main():
     # remove "smpl_" prefix
     keypoint_col_name = [col.replace("keypoint_", "") for col in keypoint_col_name]
     keypoint_batch.columns = keypoint_col_name
-    print(keypoint_batch.head(1))
     position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_batch)
 
     # frame to visualize

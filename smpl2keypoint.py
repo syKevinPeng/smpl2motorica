@@ -10,6 +10,9 @@ import smplx
 import torch
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation as R
+from mpl_toolkits.mplot3d import Axes3D
+
+from smpl2motorica.utils.data import MocapData
 
 sys.path.append("../")
 from smpl2motorica.utils.bvh import BVHParser
@@ -95,6 +98,18 @@ def smpl2motorica():
 
 
 def expand_skeleton(skeleton: list):
+    """
+    Expands a list of skeleton joints into a list of joint-axis combinations.
+
+    Each joint in the input list is expanded into three elements, one for each
+    axis of rotation (X, Y, Z).
+
+    Args:
+        skeleton (list): A list of joint names.
+
+    Returns:
+        list: A list of joint-axis combinations in the format "{joint}_{axis}rotation".
+    """
     expanded_skeleton = [
         f"{joint}_{axis}rotation" for joint in skeleton for axis in ["X", "Y", "Z"]
     ]
@@ -109,7 +124,21 @@ def motorica_draw_stickfigure3d(
     joints=None,
     draw_names=True,
 ):
-    from mpl_toolkits.mplot3d import Axes3D
+    """
+    Draws a 3D stick figure on the given matplotlib 3D axis based on motion capture data.
+
+    Parameters:
+    ax (matplotlib.axes._subplots.Axes3DSubplot): The 3D axis to draw the stick figure on.
+    mocap_track (object): The motion capture track containing skeleton and values.
+    frame (int): The frame number to draw.
+    data (pandas.DataFrame, optional): Custom data to use for drawing. Defaults to None, which uses mocap_track values.
+    joints (list, optional): List of joints to draw. Defaults to None, which draws all joints in the skeleton.
+    draw_names (bool, optional): Whether to draw joint names. Defaults to True.
+
+    Returns:
+    matplotlib.axes._subplots.Axes3DSubplot: The axis with the drawn stick figure.
+    """
+
     # ax.view_init(elev=0, azim=120)
 
     if joints is None:
@@ -166,6 +195,20 @@ def motorica_draw_stickfigure3d(
 
 
 def SMPL_output_video(joints, vertices, model):
+    """
+    Generates a video from SMPL model output.
+
+    This function visualizes each frame of the SMPL model output, saves the frames as images,
+    compiles them into a video, and then removes the images.
+
+    Args:
+        joints (numpy.ndarray): Array of joint positions for each frame.
+        vertices (numpy.ndarray): Array of vertex positions for each frame.
+        model (object): SMPL model object used for visualization.
+
+    Returns:
+        str: The filename of the generated video.
+    """
     for i in tqdm(range(joints.shape[0]), desc="Generating SMPL video"):
         fig = plt.figure(figsize=(10, 10))
         ax = SMPL_visulize_a_frame(fig, joints[i], vertices[i], model)
@@ -198,6 +241,19 @@ def SMPL_output_video(joints, vertices, model):
 
 
 def SMPL_visulize_a_frame(ax, joints, vertices, model, output_name="test.png"):
+    """
+    Visualizes a single frame of SMPL (Skinned Multi-Person Linear) model.
+
+    Parameters:
+    ax (matplotlib.axes._subplots.Axes3DSubplot): The 3D axis to plot on.
+    joints (numpy.ndarray): Array of joint coordinates with shape (N, 3).
+    vertices (numpy.ndarray): Array of vertex coordinates with shape (M, 3).
+    model (object): The SMPL model object containing the faces information.
+    output_name (str, optional): The name of the output file. Defaults to "test.png".
+
+    Returns:
+    matplotlib.axes._subplots.Axes3DSubplot: The axis with the plotted frame.
+    """
     from matplotlib import pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -228,12 +284,39 @@ def SMPL_visulize_a_frame(ax, joints, vertices, model, output_name="test.png"):
 
 
 def skeleton_scaler(skeleton, ratio):
+    """
+    Scales the offsets of each joint in the skeleton by a given ratio.
+
+    Args:
+        skeleton (dict): A dictionary representing the skeleton, where each key is a joint name and the value is another dictionary containing joint properties, including "offsets".
+        ratio (float): The scaling factor to apply to the offsets.
+
+    Returns:
+        dict: The scaled skeleton with updated offsets.
+    """
     for joint in skeleton:
         skeleton[joint]["offsets"] = np.array(skeleton[joint]["offsets"]) * ratio
     return skeleton
 
 
-def load_dummy_motorica_data():
+def load_dummy_motorica_data() -> MocapData:
+    """
+    Loads dummy motorica data from a specified BVH file, scales the skeleton, and returns the parsed data.
+
+    The function performs the following steps:
+    1. Defines the root directory for the motorica data.
+    2. Constructs the path to the specific BVH file.
+    3. Checks if the BVH file exists; raises a FileNotFoundError if it does not.
+    4. Parses the BVH file using a BVHParser.
+    5. Scales the skeleton data by a specified ratio.
+    6. Returns the parsed and scaled motorica data.
+
+    Returns:
+        motorica_dummy_data: Parsed and scaled motorica data.
+
+    Raises:
+        FileNotFoundError: If the specified BVH file does not exist.
+    """
     motorica_data_root = Path(
         "/fs/nexus-projects/PhysicsFall/data/motorica_dance_dataset"
     )
@@ -253,6 +336,21 @@ def load_dummy_motorica_data():
 
 
 def motorica_forward_kinematics(data_df):
+    """
+    Perform forward kinematics on the given data using the Motorica model.
+
+    This function takes a DataFrame containing kinematic data, applies the Motorica
+    forward kinematics model, and returns the transformed position data along with
+    the dummy Motorica data.
+
+    Args:
+        data_df (pd.DataFrame): A DataFrame containing the input kinematic data.
+
+    Returns:
+        tuple: A tuple containing:
+            - position_df (np.ndarray): The transformed position data.
+            - motorica_dummy_data (pd.DataFrame): The dummy Motorica data with updated values.
+    """
     motorica_dummy_data = load_dummy_motorica_data()
     motorica_dummy_data.values = data_df
     position_mocap = MocapParameterizer("position").fit_transform(
