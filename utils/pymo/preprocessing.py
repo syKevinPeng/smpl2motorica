@@ -272,6 +272,8 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             tree_data = {}
 
             for joint in track.traverse():
+                # if joint not in joints:
+                #     continue
                 parent = track.skeleton[joint]["parent"]
                 rot_order = track.skeleton[joint]["order"]
                 # print("rot_order:" + joint + " :" + rot_order)
