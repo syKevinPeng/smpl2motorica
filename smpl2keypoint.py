@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation as R
 from mpl_toolkits.mplot3d import Axes3D
-
+from collections import OrderedDict
 from smpl2motorica.utils.data import MocapData
 
 sys.path.append("../")
@@ -71,30 +71,48 @@ def get_motorica_skeleton_names():
         "Spine",
         "Spine1",
     ]
+def smpl_motorica_mapping():
+    return OrderedDict(
+        [
+            ("head", "Head"),
+            ("pelvis", "Hips"),
+            ("left_shoulder", "LeftArm"),
+            ("left_ankle", "LeftFoot"),
+            ("left_elbow", "LeftForeArm"),
+            ("left_wrist", "LeftHand"),
+            ("left_knee", "LeftLeg"),
+            ("left_collar", "LeftShoulder"),
+            ("left_hip", "LeftUpLeg"),
+            ("neck", "Neck"),
+            ("right_shoulder", "RightArm"),
+            ("right_ankle", "RightFoot"),
+            ("right_elbow", "RightForeArm"),
+            ("right_wrist", "RightHand"),
+            ("right_knee", "RightLeg"),
+            ("right_collar", "RightShoulder"),
+            ("right_hip", "RightUpLeg"),
+            ("spine2", "Spine"),
+            ("spine3", "Spine1"),
+        ]
+    )
 
 
 def smpl2motorica():
-    return [
-        "head",
-        "pelvis",
-        "left_shoulder",
-        "left_ankle",
-        "left_elbow",
-        "left_wrist",
-        "left_knee",
-        "left_collar",
-        "left_hip",
-        "neck",
-        "right_shoulder",
-        "right_ankle",
-        "right_elbow",
-        "right_wrist",
-        "right_knee",
-        "right_collar",
-        "right_hip",
-        "spine2",
-        "spine3",
-    ]
+    """
+    Reorders the SMPL joints to match the Motorica joints' order.
+    Returns:
+        list: A list of strings representing the SMPL keypoints corresponding to the SMPL joints' order.
+    """
+    return smpl_motorica_mapping().keys()
+
+
+def motorica2smpl():
+    """
+    Reorders the Motorica joints to match the SMPL joints' order.
+    Returns:
+        list: A list of strings representing the Motorica keypoints corresponding to the Motorica joints' order.
+    """
+    return smpl_motorica_mapping().values()
 
 
 def expand_skeleton(skeleton: list):
