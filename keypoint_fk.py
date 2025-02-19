@@ -20,6 +20,7 @@ from smpl2motorica.smpl2keypoint import (
     skeleton_scaler,
     load_dummy_motorica_data,
     motorica_draw_stickfigure3d,
+    motorica2smpl
 )
 
 
@@ -34,7 +35,7 @@ class ForwardKinematics:
             self.rotation_orders,
             self.has_position,
         ) = self._parse_skeleton(self.skeleton)
-        self.joint_index = {name: i for i, name in enumerate(self.joint_names)}
+        self.motorica_joint_in_smpl_order = list(motorica2smpl())
 
     def get_joint_order(self):
         return self.joint_names
@@ -304,18 +305,31 @@ class ForwardKinematics:
 
     def forward(self, data: Union[pd.DataFrame, torch.Tensor]):
         if isinstance(data, pd.DataFrame):
-            pos_values, rot_values = self._df_to_tensors(data)
+            pos_values, rot_values = self._df_to_tensors(data) # pos shape (num_frames, num_joints, 3), rot shape (num_frames, num_joints, 3)
         elif isinstance(data, torch.Tensor):
-            pos_value = data[:, 3:]
-            rot_values = data[:, :3]
-            rot_values = rot_values.view(rot_values.size(0), -1, 3)
-            rot_values = torch.deg2rad(rot_values)  # Convert to radians
+            pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
+            rot = data[:, 3:]
+            assert rot.shape[1] == 57, f"Expected 57 rotation values, got {rot.shape[1]}"
+            num_frames = pos.shape[0]
+            num_joints = len(self.joint_names)
+            pos_values = torch.zeros((num_frames, num_joints, 3), dtype=torch.float32, device=pos.device)
+            # position are only for the root joint
+            # find the index of the root joint
+            root_index = self.motorica_joint_in_smpl_order.index("Hips")
+            pos_values[:, root_index,:] = pos
+            # process rot
+            rot = torch.deg2rad(rot)  # Convert to radians
+            rot_values  = rot.reshape(num_frames, -1, 3)
+            # reorder the rot_values from motorica order to self.joint_names order
+            indices = [self.motorica_joint_in_smpl_order.index(joint) for joint in self.joint_names]
+            rot_values = rot_values[:, indices, :]
+            # shuffle from xyz to yzx
+            rot_values = rot_values[:, :, [1, 2, 0]]
         else:
             raise ValueError("Input data must be a DataFrame or a Tensor")
         device = pos_values.device
         dtype = pos_values.dtype
         num_frames = pos_values.shape[0]
-
         # Initialize transformations
         global_rot = torch.zeros(
             (num_frames, len(self.joint_names), 3, 3), dtype=dtype, device=device
@@ -372,6 +386,7 @@ if __name__ == "__main__":
     mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]] = 0
     mocap_track.values = mocap_df
     position_mocap = MocapParameterizer("position").fit_transform([mocap_track])[0]
+    print(position_mocap.values.columns)
     frame = 250
     fig = plt.figure(figsize=(10, 20))
     ax = fig.add_subplot(121, projection='3d')
@@ -389,7 +404,10 @@ if __name__ == "__main__":
     motorica_ax.set_ylim([-1, 1])
     motorica_ax.set_title('original Figure')
 
-    position_df = fk.forward(mocap_df)
+    selected_df = mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] + expand_skeleton(list(motorica2smpl()))]
+    selected_tensor = torch.tensor(selected_df.values, dtype=torch.float32)
+    position_df = fk.forward(selected_tensor)
+    # position_df = fk.forward(mocap_df)
     position_df = fk.convert_to_dataframe(position_df)
     ax = fig.add_subplot(122, projection='3d')
     keypoint_fk = motorica_draw_stickfigure3d(
@@ -411,3 +429,46 @@ if __name__ == "__main__":
     
 
     plt.savefig("comparison.png")
+
+        # correct_order = np.array([
+    # [ 1.1760e-02,  1.1017e-02,  3.4382e-02], #[0]
+    # [ 1.8951e-03, -1.6058e-01,  1.1852e-02], #[1]
+    # [-1.8159e-02, -2.2951e-02, -7.1017e-02], #[2]
+    # [-2.1993e-02,  2.8106e-02, -3.3211e-02], #[3]
+    # [ 5.1560e-03,  1.8165e-01,  1.0596e-02], #[4]
+    # [ 1.9840e-05,  1.5830e-01,  1.8508e-04], #[5]
+    # [-7.7480e-06,  1.2033e-01, -1.6133e-05], #[6]
+    # [ 2.4934e-02, -8.4895e-02, -1.9793e-02], #[7]
+    # [ 2.6763e-01, -1.4381e-01,  7.9965e-02], 
+    # [-2.0263e-01, -7.9458e-02,  5.1101e-02],
+    # [ 3.2295e-02, -1.2899e-01,  8.2248e-02],
+    # [ 3.4007e-03, -1.5813e-01, -1.2065e-01],
+    # [-2.9071e-02,  3.8841e-02, -2.0848e-02],
+    # [-2.8559e-01,  1.2442e-01, -4.0456e-02],
+    # [ 2.0005e-01, -9.6870e-03, -1.3214e-01],
+    # [ 1.1338e-03,  8.2315e-03, -1.4221e-01],
+    # [ 3.6974e-03, -2.4979e-02,  1.4705e-01],
+    # [-1.1061e-02, -2.0766e-01,  3.7786e-01],
+    # [ 4.0123e-02, -2.4916e-01, -2.8498e-01]])
+    # curr_order = np.array(rot_values[0,:])
+    # np.set_printoptions(precision=4)
+    """
+    [[ 3.8841e-02 -2.0848e-02 -2.9071e-02]
+    [ 1.1017e-02  3.4382e-02  1.1760e-02]
+    [ 1.2442e-01 -4.0456e-02 -2.8559e-01]
+    [-1.2899e-01  8.2248e-02  3.2295e-02]
+    [ 8.2315e-03 -1.4221e-01  1.1338e-03]
+    [-2.0766e-01  3.7786e-01 -1.1061e-02]
+    [ 1.5830e-01  1.8508e-04  1.9840e-05]
+    [-1.4381e-01  7.9965e-02  2.6763e-01]
+    [-2.2951e-02 -7.1017e-02 -1.8159e-02]
+    [-8.4895e-02 -1.9793e-02  2.4934e-02]
+    [-9.6870e-03 -1.3214e-01  2.0005e-01]
+    [-1.5813e-01 -1.2065e-01  3.4007e-03]
+    [-2.4979e-02  1.4705e-01  3.6974e-03]
+    [-2.4916e-01 -2.8498e-01  4.0123e-02]
+    [ 1.2033e-01 -1.6133e-05 -7.7480e-06]
+    [-7.9458e-02  5.1101e-02 -2.0263e-01]
+    [ 2.8106e-02 -3.3211e-02 -2.1993e-02]
+    [-1.6058e-01  1.1852e-02  1.8951e-03]
+    [ 1.8165e-01  1.0596e-02  5.1560e-03]]"""
