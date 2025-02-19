@@ -16,6 +16,7 @@ from smpl2keypoint import (
     motorica_forward_kinematics,
     get_SMPL_skeleton_names,
     expand_skeleton,
+    motorica2smpl,
 )
 
 # class SMPLDataset(Dataset):
@@ -116,7 +117,11 @@ class AlignmentDataset(Dataset):
                 ]
             ].values,
         }
-        return keypoint_df, smpl_dict
+
+        # processing keypoint_df: transfer from dataframe to tensor
+        keypoint_data = keypoint_df.values
+        keypoint_col = keypoint_df.columns
+        return keypoint_data, smpl_dict
 
     def preprocess_one_pair(self, file_path):
         """
@@ -187,10 +192,18 @@ class AlignmentDataset(Dataset):
             [smpl_body_pose_df, smpl_transl_df, smpl_global_orient_df], axis=1
         )
 
+        # reorder the sequence of the columns so that they are in the same order as the smpl data
+        keypoint_column_in_smpl_order = list(motorica2smpl())
+        keypoint_column_in_smpl_order = expand_skeleton(keypoint_column_in_smpl_order)
+        selected_col = [
+            "Hips_Xposition",
+            "Hips_Yposition",
+            "Hips_Zposition",
+        ] + keypoint_column_in_smpl_order
+        keypoint_data = keypoint_data[selected_col]
         keypoint_data.columns = ["keypoint_" + name for name in keypoint_data.columns]
         combined_df = pd.concat([keypoint_data, smpl_df], axis=1)
 
-        # col_name = keypoint_data.columns
 
         return combined_df
 
@@ -230,8 +243,10 @@ class AlignmentDataModule(pl.LightningDataModule):
 
     def collate_fn(self, batch):
         # keypoint is a dataframe and smpl is a dict
-        keypoint_df_batch, smpl_dict_batch = zip(*batch)
-        keypoint_df_batch = pd.concat(keypoint_df_batch, ignore_index=True)
+        keypoint_batch, smpl_dict_batch = zip(*batch)
+        keypoint_stacked_batch  = torch.stack(
+            [torch.tensor(item, dtype=torch.float32) for item in keypoint_batch]
+        )
         # for each key in the dict, stack the values
         smpl_body_pose = torch.stack(
             [
@@ -258,7 +273,7 @@ class AlignmentDataModule(pl.LightningDataModule):
             "smpl_global_orient": smpl_global_orient,
         }
 
-        return keypoint_df_batch, smpl_dict_batch
+        return keypoint_stacked_batch, smpl_dict_batch
 
     def train_dataloader(self):
         return DataLoader(
@@ -278,9 +293,7 @@ def main():
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
 
-    alignment_data = AlignmentDataset(
-        data_dir, segment_length=50, force_reprocess=False
-    )
+    alignment_data = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
     # save all the data in a pickle file
     # for i in range(len(alignment_data)):
     #     keypoint_batch, keypoint_col_name, smpl_batch = alignment_data[i]
@@ -315,11 +328,15 @@ def main():
     smpl_joints_loc = smpl_joints_loc[:, :24, :]
 
     # processing motorica data
-    keypoint_col_name = keypoint_batch.columns
+    keypoint_col_name = selected_col = [
+            "Hips_Xposition",
+            "Hips_Yposition",
+            "Hips_Zposition",
+        ]  + expand_skeleton(list(motorica2smpl()))
     # remove "smpl_" prefix
     keypoint_col_name = [col.replace("keypoint_", "") for col in keypoint_col_name]
-    keypoint_batch.columns = keypoint_col_name
-    position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_batch)
+    keypoint_batch_df = pd.DataFrame(keypoint_batch, columns=keypoint_col_name)
+    position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_batch_df)
 
     # frame to visualize
     frame = 0

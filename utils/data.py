@@ -23,6 +23,7 @@ class MocapData:
         while stack:
             joint = stack.pop()
             yield joint
+            # if joint in self.skeleton:
             for c in self.skeleton[joint]["children"]:
                 stack.append(c)
 
@@ -58,3 +59,6 @@ class MocapData:
     def get_constant_channels(self):
         # TODO
         pass
+
+    def set_skeleton(self, skeleton):
+        self.skeleton = skeleton

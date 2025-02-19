@@ -17,7 +17,7 @@ from smpl2motorica.smpl2keypoint import (
     smpl2motorica,
 )
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
-
+from smpl2motorica.keypoint_fk import ForwardKinematics
 
 class RotationTranslationNet(nn.Module):
     def __init__(self):
@@ -48,6 +48,7 @@ class KeypointModel(pl.LightningModule):
             raise FileNotFoundError(
                 f"SMPL model path {self.smpl_model_path} does not exist."
             )
+        self.keypoint_fk = ForwardKinematics()
 
     def forward(self, x):
         return self.model(x)
@@ -127,24 +128,10 @@ class KeypointModel(pl.LightningModule):
 
         return keypoint_combined
 
-    def keypoint_forward_kinematics(self, transl, rotation, keypoint_col_names):
-        keypoint_df = pd.DataFrame(
-            torch.cat([transl, rotation], dim=1).detach().cpu().numpy(),
-            columns=[col.replace("keypoint_", "") for col in keypoint_col_names],
-        )
-        self.motorica_dummy_data.values = keypoint_df
-        position_mocap = MocapParameterizer("position").fit_transform(
-            [self.motorica_dummy_data]
-        )[0]
-        position_df = position_mocap.values
-        # select only the keypoint joints
-        keypoint_joints = get_motorica_skeleton_names()
-        expanded_keypoint_joints = [
-            f"{joint}_{axis}position"
-            for joint in keypoint_joints
-            for axis in ["X", "Y", "Z"]
-        ]
-        position_df = position_df[expanded_keypoint_joints]
+    def keypoint_forward_kinematics(self, keypoint_data):
+        # keypoint data contains the translation and rotation of the keypoints
+        # first 3 columns are the translation, and the rest are the rotation that have the same order as motorica2smpl
+        keypoint_position = self.keypoint_fk.forward(keypoint_data)
         return position_df
 
     def smpl_dict_to_cuda(self, smpl_dict):
@@ -201,9 +188,11 @@ class KeypointModel(pl.LightningModule):
         keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
         # rad to degree
         keypoint_rot = torch.rad2deg(keypoint_batch)
+        # form into the same shape as the original keypoint data
+        predicted_keypoint = torch.cat([adjusted_transl, keypoint_rot], dim=1)
         # apply forward kinematics to the adjusted rotation and translation
-        keypoint_loc = self.keypoint_forward_kinematics(
-            adjusted_transl, keypoint_rot, keypoint_col_names
+        keypoint_loc = self.keypoint_forward_kinematics( predicted_keypoint
+            
         )
 
         # apply forward kinematics to the smpl data

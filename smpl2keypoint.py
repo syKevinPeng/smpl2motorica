@@ -12,9 +12,9 @@ from tqdm import tqdm
 from scipy.spatial.transform import Rotation as R
 from mpl_toolkits.mplot3d import Axes3D
 from collections import OrderedDict
-from smpl2motorica.utils.data import MocapData
 
 sys.path.append("../")
+from smpl2motorica.utils.data import MocapData
 from smpl2motorica.utils.bvh import BVHParser
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 
@@ -101,7 +101,7 @@ def smpl2motorica():
     """
     Reorders the SMPL joints to match the Motorica joints' order.
     Returns:
-        list: A list of strings representing the SMPL keypoints corresponding to the SMPL joints' order.
+        list: A list of strings representing the SMPL keypoints corresponding to the Motorica joints' order.
     """
     return smpl_motorica_mapping().keys()
 
@@ -110,7 +110,7 @@ def motorica2smpl():
     """
     Reorders the Motorica joints to match the SMPL joints' order.
     Returns:
-        list: A list of strings representing the Motorica keypoints corresponding to the Motorica joints' order.
+        list: A list of strings representing the Motorica keypoints corresponding to the SMPL joints' order.
     """
     return smpl_motorica_mapping().values()
 
@@ -347,6 +347,10 @@ def load_dummy_motorica_data() -> MocapData:
         raise FileNotFoundError(f"Motion file {motorica_motion_path} does not exist.")
     bvh_parser = BVHParser()
     motorica_dummy_data = bvh_parser.parse(motorica_motion_path)
+    # filter out the joint that we don't need
+    motorica_dummy_data.skeleton = {
+        k: v for k, v in motorica_dummy_data.skeleton.items() if k in get_motorica_skeleton_names()
+    }
     # scale the skeleton
     ratio = 0.01
     motorica_dummy_data.skeleton = skeleton_scaler(motorica_dummy_data.skeleton, ratio)

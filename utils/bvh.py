@@ -280,3 +280,6 @@ class BVHParser:
                 self._motions[idx] = (frame_time, channel_values)
                 frame_time = frame_time + frame_rate
                 idx += 1
+
+    def set_skeleton(self, skeleton):
+        self._skeleton = skeleton

@@ -1,3 +1,6 @@
+from turtle import position
+from arrow import get
+from sympy import Union
 import torch
 import numpy as np
 import pandas as pd
@@ -5,14 +8,18 @@ from pytorch3d.transforms import euler_angles_to_matrix
 from collections import deque
 from pathlib import Path
 import sys
+import matplotlib.pyplot as plt
 
 sys.path.append("../")
+from typing import Union
 from smpl2motorica.utils.bvh import BVHParser
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.smpl2keypoint import (
     get_motorica_skeleton_names,
     expand_skeleton,
     skeleton_scaler,
+    load_dummy_motorica_data,
+    motorica_draw_stickfigure3d,
 )
 
 
@@ -29,6 +36,9 @@ class ForwardKinematics:
         ) = self._parse_skeleton(self.skeleton)
         self.joint_index = {name: i for i, name in enumerate(self.joint_names)}
 
+    def get_joint_order(self):
+        return self.joint_names
+    
     # This is the slowest way to get the skeleton
     def _get_skeleton(self):
         motorica_data_root = Path(
@@ -97,7 +107,8 @@ class ForwardKinematics:
                 "channels": ["Zrotation", "Xrotation", "Yrotation"],
                 "offsets": np.array([0.0, 0.147056, 0.018975]),
                 "order": "ZXY",
-                "children": ["Head_Nub"],
+                "children": [],
+                # "children": ["Head_Nub"],
             },
             "LeftShoulder": {
                 "parent": "Spine1",
@@ -125,13 +136,14 @@ class ForwardKinematics:
                 "channels": ["Zrotation", "Xrotation", "Yrotation"],
                 "offsets": np.array([0.234148, 0.00116565, 0.00321146]),
                 "order": "ZXY",
-                "children": [
-                    "LeftHandThumb1",
-                    "LeftHandIndex1",
-                    "LeftHandMiddle1",
-                    "LeftHandRing1",
-                    "LeftHandPinky1",
-                ],
+                "children": [],
+                # "children": [
+                #     "LeftHandThumb1",
+                #     "LeftHandIndex1",
+                #     "LeftHandMiddle1",
+                #     "LeftHandRing1",
+                #     "LeftHandPinky1",
+                # ],
             },
             "RightShoulder": {
                 "parent": "Spine1",
@@ -159,13 +171,14 @@ class ForwardKinematics:
                 "channels": ["Zrotation", "Xrotation", "Yrotation"],
                 "offsets": np.array([-0.237607, 0.00081803, 0.00144663]),
                 "order": "ZXY",
-                "children": [
-                    "RightHandThumb1",
-                    "RightHandIndex1",
-                    "RightHandMiddle1",
-                    "RightHandRing1",
-                    "RightHandPinky1",
-                ],
+                "children": [],
+                # "children": [
+                #     "RightHandThumb1",
+                #     "RightHandIndex1",
+                #     "RightHandMiddle1",
+                #     "RightHandRing1",
+                #     "RightHandPinky1",
+                # ],
             },
             "LeftUpLeg": {
                 "parent": "Hips",
@@ -186,7 +199,8 @@ class ForwardKinematics:
                 "channels": ["Zrotation", "Xrotation", "Yrotation"],
                 "offsets": np.array([0.00057702, -0.408583, 0.00046285]),
                 "order": "ZXY",
-                "children": ["LeftToeBase"],
+                "children": [],
+                # "children": ["LeftToeBase"],
             },
             "RightUpLeg": {
                 "parent": "Hips",
@@ -207,7 +221,8 @@ class ForwardKinematics:
                 "channels": ["Zrotation", "Xrotation", "Yrotation"],
                 "offsets": np.array([0.00278006, -0.403849, 0.00049768]),
                 "order": "ZXY",
-                "children": ["RightToeBase"],
+                "children": [],
+                # "children": ["RightToeBase"],
             },
         }
 
@@ -287,8 +302,16 @@ class ForwardKinematics:
 
         return pos_tensor, rot_tensor
 
-    def forward(self, df):
-        pos_values, rot_values = self._df_to_tensors(df)
+    def forward(self, data: Union[pd.DataFrame, torch.Tensor]):
+        if isinstance(data, pd.DataFrame):
+            pos_values, rot_values = self._df_to_tensors(data)
+        elif isinstance(data, torch.Tensor):
+            pos_value = data[:, 3:]
+            rot_values = data[:, :3]
+            rot_values = rot_values.view(rot_values.size(0), -1, 3)
+            rot_values = torch.deg2rad(rot_values)  # Convert to radians
+        else:
+            raise ValueError("Input data must be a DataFrame or a Tensor")
         device = pos_values.device
         dtype = pos_values.dtype
         num_frames = pos_values.shape[0]
@@ -336,52 +359,55 @@ class ForwardKinematics:
             data[f"{joint}_Zposition"] = pos[:, 2]
 
         return pd.DataFrame(data)
-
+    
 
 if __name__ == "__main__":
-    motorica_data_root = Path(
-        "/fs/nexus-projects/PhysicsFall/data/motorica_dance_dataset"
-    )
-
-    motorica_motion_path = (
-        motorica_data_root
-        / "bvh"
-        / "kthjazz_gCH_sFM_cAll_d02_mCH_ch01_beatlestreetwashboardbandfortyandtight_003.bvh"
-    )
-    if not motorica_motion_path.exists():
-        raise FileNotFoundError(f"Motion file {motorica_motion_path} does not exist. ")
-
-    # load the motion
-    bvh_parser = BVHParser()
-    motorica_dummy_data = bvh_parser.parse(motorica_motion_path)
-    motorica_dummy_df = motorica_dummy_data.values
-
-    # Filter out unnecessary columns
-    joints_to_keep = get_motorica_skeleton_names()
-    expand_joints_to_keep = expand_skeleton(joints_to_keep)
-    # append location to the joint names
-    expand_joint_with_location = [
-        "Hips_Xposition",
-        "Hips_Yposition",
-        "Hips_Zposition",
-    ] + expand_joints_to_keep
-
-    # make the starting position of the skeleton at the origin
-    motorica_dummy_df["Hips_Xposition"] -= motorica_dummy_df["Hips_Xposition"].values[0]
-    motorica_dummy_df["Hips_Yposition"] -= motorica_dummy_df["Hips_Yposition"].values[0]
-    motorica_dummy_df["Hips_Zposition"] -= motorica_dummy_df["Hips_Zposition"].values[0]
-
-    # filter out unnecessary joints
-    motorica_dummy_df = motorica_dummy_df[expand_joint_with_location]
+    # forward kinematics
     fk = ForwardKinematics()
-    position = fk.forward(motorica_dummy_df)
-    position_df = fk.convert_to_dataframe(position)
-    print(position_df)
 
-    # # for comparison
-    # motorica_dummy_data.values = pd.DataFrame(
-    #         (motorica_dummy_df), columns=motorica_dummy_df.columns
-    #     )
-    # pose_df = MocapParameterizer("position").fit_transform([motorica_dummy_data])[0]
-    # pose_df = pose_df.values.reindex(sorted(pose_df.values.columns), axis=1)
-    # print(pose_df)
+    mocap_track = load_dummy_motorica_data()
+    mocap_track.skeleton = fk.get_skeleton()
+    mocap_df = mocap_track.values
+    # force the starting position to be zero all the time
+    mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]] = 0
+    mocap_track.values = mocap_df
+    position_mocap = MocapParameterizer("position").fit_transform([mocap_track])[0]
+    frame = 250
+    fig = plt.figure(figsize=(10, 20))
+    ax = fig.add_subplot(121, projection='3d')
+    motorica_ax = motorica_draw_stickfigure3d(
+                ax,
+                mocap_track=position_mocap,
+                frame=frame, draw_names=True
+            )
+    motorica_ax.set_xlabel('X axis')
+    motorica_ax.set_ylabel('Y axis')
+    motorica_ax.set_zlabel('Z axis')
+    motorica_ax.set_box_aspect([1, 1, 1])
+    motorica_ax.set_zlim([-1, 1])
+    motorica_ax.set_xlim([-1, 1])
+    motorica_ax.set_ylim([-1, 1])
+    motorica_ax.set_title('original Figure')
+
+    position_df = fk.forward(mocap_df)
+    position_df = fk.convert_to_dataframe(position_df)
+    ax = fig.add_subplot(122, projection='3d')
+    keypoint_fk = motorica_draw_stickfigure3d(
+                ax,
+                mocap_track=mocap_track,
+                frame=frame, draw_names=True,
+                data= position_df
+            )
+    keypoint_fk.set_xlabel('X axis')
+    keypoint_fk.set_ylabel('Y axis')
+    keypoint_fk.set_zlabel('Z axis')
+    keypoint_fk.set_box_aspect([1, 1, 1])
+    keypoint_fk.set_zlim([-1, 1])
+    keypoint_fk.set_xlim([-1, 1])
+    keypoint_fk.set_ylim([-1, 1])
+    keypoint_fk.set_title('Forward Kinematics')
+
+    
+    
+
+    plt.savefig("comparison.png")
