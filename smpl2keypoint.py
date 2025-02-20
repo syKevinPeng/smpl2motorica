@@ -115,7 +115,7 @@ def motorica2smpl():
     return smpl_motorica_mapping().values()
 
 
-def expand_skeleton(skeleton: list):
+def expand_skeleton(skeleton: list, order = "XYZ"):
     """
     Expands a list of skeleton joints into a list of joint-axis combinations.
 
@@ -128,12 +128,78 @@ def expand_skeleton(skeleton: list):
     Returns:
         list: A list of joint-axis combinations in the format "{joint}_{axis}rotation".
     """
+    # check if the order is valid
+    if len(order) != 3:
+        raise ValueError("The order must be a string of length 3")
+    if not all([axis in "XYZ" for axis in order]):
+        raise ValueError("The order must contain only 'X', 'Y', and 'Z'")
     expanded_skeleton = [
-        f"{joint}_{axis}rotation" for joint in skeleton for axis in ["X", "Y", "Z"]
+        f"{joint}_{axis}rotation" for joint in skeleton for axis in order
     ]
     return expanded_skeleton
 
+# def motorica_draw_stickfigure3d(
+#     ax,
+#     mocap_track,
+#     frame,
+#     data=None,
+#     joints=None,
+#     draw_names=True,
+# ):
+#     """
+#     Draws a 3D stick figure on the given matplotlib 3D axis based on motion capture data.
 
+#     Parameters:
+#     ax (matplotlib.axes._subplots.Axes3DSubplot): The 3D axis to draw the stick figure on.
+#     mocap_track (object): The motion capture track containing skeleton and values.
+#     frame (int): The frame number to draw.
+#     data (pandas.DataFrame, optional): Custom data to use for drawing. Defaults to None, which uses mocap_track values.
+#     joints (list, optional): List of joints to draw. Defaults to None, which draws all joints in the skeleton.
+#     draw_names (bool, optional): Whether to draw joint names. Defaults to True.
+
+#     Returns:
+#     matplotlib.axes._subplots.Axes3DSubplot: The axis with the drawn stick figure.
+#     """
+
+#     # ax.view_init(elev=0, azim=120)
+
+#     if joints is None:
+#         joints_to_draw = mocap_track.skeleton.keys()
+#     else:
+#         joints_to_draw = joints
+
+#     if data is None:
+#         df = mocap_track.values
+#     else:
+#         df = data
+
+#     for idx, joint in enumerate(joints_to_draw):
+#         # ^ In mocaps, Y is the up-right axis
+#         parent_x = df["%s_Xposition" % joint][frame]
+#         parent_y = df["%s_Zposition" % joint][frame]
+#         parent_z = df["%s_Yposition" % joint][frame]
+
+#         ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
+
+#         children_to_draw = [
+#             c for c in mocap_track.skeleton[joint]["children"] if c in joints_to_draw
+#         ]
+
+#         for c in children_to_draw:
+#             # ^ In mocaps, Y is the up-right axis
+#             child_x = df["%s_Xposition" % c][frame]
+#             child_y = df["%s_Zposition" % c][frame]
+#             child_z = df["%s_Yposition" % c][frame]
+
+#             ax.plot(
+#                 [parent_x, child_x],
+#                 [parent_y, child_y],
+#                 [parent_z, child_z],
+#                 # "k-",
+#                 lw=2,
+#                 c="black",
+#             )
+#     return ax
 def motorica_draw_stickfigure3d(
     ax,
     mocap_track,
@@ -171,14 +237,9 @@ def motorica_draw_stickfigure3d(
 
     for idx, joint in enumerate(joints_to_draw):
         # ^ In mocaps, Y is the up-right axis
-        parent_x = df["%s_Xposition" % joint][frame]
-        parent_y = df["%s_Zposition" % joint][frame]
-        parent_z = df["%s_Yposition" % joint][frame]
-
-        # parent_x = df["%s_Xposition" % joint][frame]
-        # parent_y = df["%s_Yposition" % joint][frame]
-        # parent_z = df["%s_Zposition" % joint][frame]
-
+        parent_x = df[f"{joint}_Xposition"].iloc[frame]
+        parent_y = df[f"{joint}_Zposition"].iloc[frame]
+        parent_z = df[f"{joint}_Yposition"].iloc[frame]
         ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
 
         children_to_draw = [
@@ -187,16 +248,16 @@ def motorica_draw_stickfigure3d(
 
         for c in children_to_draw:
             # ^ In mocaps, Y is the up-right axis
-            child_x = df["%s_Xposition" % c][frame]
-            child_y = df["%s_Zposition" % c][frame]
-            child_z = df["%s_Yposition" % c][frame]
-
+            child_x = df[f"{c}_Xposition"].iloc[frame]
+            child_y = df[f"{c}_Zposition"].iloc[frame]
+            child_z = df[f"{c}_Yposition"].iloc[frame]
+            
             ax.plot(
                 [parent_x, child_x],
                 [parent_y, child_y],
                 [parent_z, child_z],
                 # "k-",
-                lw=2,
+                lw=4,
                 c="black",
             )
 

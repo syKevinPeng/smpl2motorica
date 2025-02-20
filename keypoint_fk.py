@@ -1,10 +1,8 @@
-from turtle import position
-from arrow import get
-from sympy import Union
+from sympy import Union, euler
 import torch
 import numpy as np
 import pandas as pd
-from pytorch3d.transforms import euler_angles_to_matrix
+from pytorch3d.transforms import euler_angles_to_matrix, matrix_to_quaternion
 from collections import deque
 from pathlib import Path
 import sys
@@ -303,40 +301,18 @@ class ForwardKinematics:
 
         return pos_tensor, rot_tensor
 
-    def forward(self, data: Union[pd.DataFrame, torch.Tensor]):
-        if isinstance(data, pd.DataFrame):
-            pos_values, rot_values = self._df_to_tensors(data) # pos shape (num_frames, num_joints, 3), rot shape (num_frames, num_joints, 3)
-        elif isinstance(data, torch.Tensor):
-            pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
-            rot = data[:, 3:]
-            assert rot.shape[1] == 57, f"Expected 57 rotation values, got {rot.shape[1]}"
-            num_frames = pos.shape[0]
-            num_joints = len(self.joint_names)
-            pos_values = torch.zeros((num_frames, num_joints, 3), dtype=torch.float32, device=pos.device)
-            # position are only for the root joint
-            # find the index of the root joint
-            root_index = self.motorica_joint_in_smpl_order.index("Hips")
-            pos_values[:, root_index,:] = pos
-            # process rot
-            rot = torch.deg2rad(rot)  # Convert to radians
-            rot_values  = rot.reshape(num_frames, -1, 3)
-            # reorder the rot_values from motorica order to self.joint_names order
-            indices = [self.motorica_joint_in_smpl_order.index(joint) for joint in self.joint_names]
-            rot_values = rot_values[:, indices, :]
-            # shuffle from xyz to yzx
-            rot_values = rot_values[:, :, [1, 2, 0]]
-        else:
-            raise ValueError("Input data must be a DataFrame or a Tensor")
+    def forward_df(self, df):
+        pos_values, rot_values = self._df_to_tensors(df)
         device = pos_values.device
         dtype = pos_values.dtype
         num_frames = pos_values.shape[0]
+
         # Initialize transformations
         global_rot = torch.zeros(
             (num_frames, len(self.joint_names), 3, 3), dtype=dtype, device=device
         )
         global_pos = torch.zeros_like(pos_values)
-
-        for j in range(len(self.joint_names)):
+        for j, joint in enumerate(self.joint_names):
             parent = self.parents[j]
 
             # Convert to rotation matrices
@@ -359,41 +335,99 @@ class ForwardKinematics:
                 ).squeeze(-1)
                 global_pos[:, j] = global_pos[:, parent] + rotated_offset
 
-        return global_pos
+        return global_pos, self.joint_names
 
+    # A differentiable forward kinematics function
+    def forward(self, data: torch.Tensor):
+        pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
+        rot = data[:, 3:]
+        assert rot.shape[1] == 57, f"Expected 57 rotation values, got {rot.shape[1]}"
+        num_frames = pos.shape[0]
+        num_joints = len(self.joint_names)
+        device = pos.device
+        dtype = pos.dtype
+        rot = torch.deg2rad(rot)
+        rot_values = rot.reshape(num_frames, num_joints, 3)
+        # convert rot to rotation matrix
+        rot_values = euler_angles_to_matrix(rot_values, self.rotation_orders[0]) # (num_frames, num_joints, 3, 3)
+        
+        global_pos_list = []
+        global_rot_list = []
+        self.offsets = self.offsets.to(device=device, dtype=dtype)
+        for j, joint in enumerate(self.joint_names): # we have parsed joint name in hierarchy order
+            if joint == "Hips":
+                assert j == 0, f"Expected root joint to be at index 0, got {j}"
+                # processing root joint
+                global_pos_list.append(pos)
+                global_rot_list.append(rot_values[:, j,:])
+            else:
+                # processing other joints
+                parent = self.parents[j]
+                # compute rotations
+                parent_rot = global_rot_list[parent]
+                global_rot = torch.bmm(parent_rot, rot_values[:, j,:,:]) # HERE!
+                global_rot_list.append(global_rot)
+
+                # compuate positions
+                batch_size = pos.shape[0]
+                # pos shape:(num_frame, 3), offset shape:(3,)
+                local_pose = pos + self.offsets[j].expand(batch_size, -1)
+                #parent_rot: torch.Size([num_frame, 3, 3]); local_pose: torch.Size([num_frame, 3])
+                rotated_offset = torch.bmm(global_rot_list[parent],local_pose.unsqueeze(-1)).squeeze(-1)
+                global_pos = global_pos_list[parent] + rotated_offset
+                global_pos_list.append(global_pos)
+
+        global_pos = torch.stack(global_pos_list, dim=1) # joint order in self.joint_names
+        return global_pos,self.joint_names
+        
+    
     def convert_to_dataframe(self, positions):
         """Convert output tensor back to DataFrame format"""
         columns = []
         data = {}
 
+        positions = positions.detach().cpu().numpy()
+
         for j, joint in enumerate(self.joint_names):
-            pos = positions[:, j].cpu().numpy()
+            pos = positions[:, j]
             data[f"{joint}_Xposition"] = pos[:, 0]
             data[f"{joint}_Yposition"] = pos[:, 1]
             data[f"{joint}_Zposition"] = pos[:, 2]
-
         return pd.DataFrame(data)
+    
+    def grad_check(self,):
+        from torch.autograd import gradcheck
+        dummy_input = torch.randn(5, 60, requires_grad=True)
+
+        def forward_wrapper(data):
+            return self.forward(data).sum()
+        test = gradcheck(forward_wrapper, (dummy_input,), eps=1e-6, atol=1e-4)
+        
     
 
 if __name__ == "__main__":
+
+
     # forward kinematics
     fk = ForwardKinematics()
+    torch.autograd.set_detect_anomaly(True)
+    # fk.grad_check()
 
     mocap_track = load_dummy_motorica_data()
     mocap_track.skeleton = fk.get_skeleton()
     mocap_df = mocap_track.values
+
     # force the starting position to be zero all the time
     mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]] = 0
     mocap_track.values = mocap_df
     position_mocap = MocapParameterizer("position").fit_transform([mocap_track])[0]
-    print(position_mocap.values.columns)
-    frame = 250
+    frame = 150
     fig = plt.figure(figsize=(10, 20))
     ax = fig.add_subplot(121, projection='3d')
     motorica_ax = motorica_draw_stickfigure3d(
                 ax,
                 mocap_track=position_mocap,
-                frame=frame, draw_names=True
+                frame=frame, draw_names=False
             )
     motorica_ax.set_xlabel('X axis')
     motorica_ax.set_ylabel('Y axis')
@@ -403,17 +437,22 @@ if __name__ == "__main__":
     motorica_ax.set_xlim([-1, 1])
     motorica_ax.set_ylim([-1, 1])
     motorica_ax.set_title('original Figure')
+    input_data_order = ["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] + expand_skeleton(list(motorica2smpl()))
+    selected_df = mocap_df[input_data_order]
+    # hiarchy order:
+    hiarchy_order =["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] +  expand_skeleton(fk.get_joint_order(), "ZXY")
+    # reorder from input_data_order to hiarchy_order
+    selected_df = selected_df[hiarchy_order]
 
-    selected_df = mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] + expand_skeleton(list(motorica2smpl()))]
-    selected_tensor = torch.tensor(selected_df.values, dtype=torch.float32)
-    position_df = fk.forward(selected_tensor)
-    # position_df = fk.forward(mocap_df)
-    position_df = fk.convert_to_dataframe(position_df)
+    selected_tensor = torch.tensor(selected_df.values, dtype=torch.float32, requires_grad=True)
+    position_tensor, tensor_name = fk.forward(selected_tensor)
+    position_df = fk.convert_to_dataframe(position_tensor)
+    # check if the output is the same
     ax = fig.add_subplot(122, projection='3d')
     keypoint_fk = motorica_draw_stickfigure3d(
                 ax,
                 mocap_track=mocap_track,
-                frame=frame, draw_names=True,
+                frame=frame, draw_names=False,
                 data= position_df
             )
     keypoint_fk.set_xlabel('X axis')
@@ -425,50 +464,10 @@ if __name__ == "__main__":
     keypoint_fk.set_ylim([-1, 1])
     keypoint_fk.set_title('Forward Kinematics')
 
-    
+    motorica_ax.view_init(azim=-90, elev=10)
+    keypoint_fk.view_init(azim=-90, elev=10)
     
 
     plt.savefig("comparison.png")
 
-        # correct_order = np.array([
-    # [ 1.1760e-02,  1.1017e-02,  3.4382e-02], #[0]
-    # [ 1.8951e-03, -1.6058e-01,  1.1852e-02], #[1]
-    # [-1.8159e-02, -2.2951e-02, -7.1017e-02], #[2]
-    # [-2.1993e-02,  2.8106e-02, -3.3211e-02], #[3]
-    # [ 5.1560e-03,  1.8165e-01,  1.0596e-02], #[4]
-    # [ 1.9840e-05,  1.5830e-01,  1.8508e-04], #[5]
-    # [-7.7480e-06,  1.2033e-01, -1.6133e-05], #[6]
-    # [ 2.4934e-02, -8.4895e-02, -1.9793e-02], #[7]
-    # [ 2.6763e-01, -1.4381e-01,  7.9965e-02], 
-    # [-2.0263e-01, -7.9458e-02,  5.1101e-02],
-    # [ 3.2295e-02, -1.2899e-01,  8.2248e-02],
-    # [ 3.4007e-03, -1.5813e-01, -1.2065e-01],
-    # [-2.9071e-02,  3.8841e-02, -2.0848e-02],
-    # [-2.8559e-01,  1.2442e-01, -4.0456e-02],
-    # [ 2.0005e-01, -9.6870e-03, -1.3214e-01],
-    # [ 1.1338e-03,  8.2315e-03, -1.4221e-01],
-    # [ 3.6974e-03, -2.4979e-02,  1.4705e-01],
-    # [-1.1061e-02, -2.0766e-01,  3.7786e-01],
-    # [ 4.0123e-02, -2.4916e-01, -2.8498e-01]])
-    # curr_order = np.array(rot_values[0,:])
-    # np.set_printoptions(precision=4)
-    """
-    [[ 3.8841e-02 -2.0848e-02 -2.9071e-02]
-    [ 1.1017e-02  3.4382e-02  1.1760e-02]
-    [ 1.2442e-01 -4.0456e-02 -2.8559e-01]
-    [-1.2899e-01  8.2248e-02  3.2295e-02]
-    [ 8.2315e-03 -1.4221e-01  1.1338e-03]
-    [-2.0766e-01  3.7786e-01 -1.1061e-02]
-    [ 1.5830e-01  1.8508e-04  1.9840e-05]
-    [-1.4381e-01  7.9965e-02  2.6763e-01]
-    [-2.2951e-02 -7.1017e-02 -1.8159e-02]
-    [-8.4895e-02 -1.9793e-02  2.4934e-02]
-    [-9.6870e-03 -1.3214e-01  2.0005e-01]
-    [-1.5813e-01 -1.2065e-01  3.4007e-03]
-    [-2.4979e-02  1.4705e-01  3.6974e-03]
-    [-2.4916e-01 -2.8498e-01  4.0123e-02]
-    [ 1.2033e-01 -1.6133e-05 -7.7480e-06]
-    [-7.9458e-02  5.1101e-02 -2.0263e-01]
-    [ 2.8106e-02 -3.3211e-02 -2.1993e-02]
-    [-1.6058e-01  1.1852e-02  1.8951e-03]
-    [ 1.8165e-01  1.0596e-02  5.1560e-03]]"""
+     
