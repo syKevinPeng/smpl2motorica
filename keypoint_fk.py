@@ -1,4 +1,3 @@
-from sympy import Union, euler
 import torch
 import numpy as np
 import pandas as pd
@@ -297,7 +296,7 @@ class ForwardKinematics:
             order = self.rotation_orders[j]
             rot_cols = [f"{joint}_{axis}rotation" for axis in order]
             rotations_deg = torch.tensor(df[rot_cols].values, dtype=torch.float32)
-            rot_tensor[:, j] = torch.deg2rad(rotations_deg)  # Convert to radians
+            rot_tensor[:, j] = rotations_deg
 
         return pos_tensor, rot_tensor
 
@@ -335,21 +334,23 @@ class ForwardKinematics:
                 ).squeeze(-1)
                 global_pos[:, j] = global_pos[:, parent] + rotated_offset
 
-        return global_pos, self.joint_names
+        return global_pos
 
     # A differentiable forward kinematics function
     def forward(self, data: torch.Tensor):
+        # input shape: (batch_size x num_frames, num_joints x 3)
+        if data.dim() !=2 or data.shape[1] != 60:
+            raise ValueError("Expect input data to have shape (batch_size x num_frames, num_joints x 3)")
         pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
         rot = data[:, 3:]
-        assert rot.shape[1] == 57, f"Expected 57 rotation values, got {rot.shape[1]}"
         num_frames = pos.shape[0]
         num_joints = len(self.joint_names)
         device = pos.device
         dtype = pos.dtype
-        rot = torch.deg2rad(rot)
+        # rot = torch.deg2rad(rot)
         rot_values = rot.reshape(num_frames, num_joints, 3)
         # convert rot to rotation matrix
-        rot_values = euler_angles_to_matrix(rot_values, self.rotation_orders[0]) # (num_frames, num_joints, 3, 3)
+        rot_values = euler_angles_to_matrix(rot_values, self.rotation_orders[0])
         
         global_pos_list = []
         global_rot_list = []
@@ -378,15 +379,18 @@ class ForwardKinematics:
                 global_pos_list.append(global_pos)
 
         global_pos = torch.stack(global_pos_list, dim=1) # joint order in self.joint_names
-        return global_pos,self.joint_names
+        return global_pos
         
     
     def convert_to_dataframe(self, positions):
         """Convert output tensor back to DataFrame format"""
+        """position shape: (num_frames, num_joints (19), 3)"""
         columns = []
         data = {}
 
         positions = positions.detach().cpu().numpy()
+        # check position shape
+        assert positions.shape[1] == len(self.joint_names), f"Expected position shape to be (num_frames, num_joints (19)), got {positions.shape}"
 
         for j, joint in enumerate(self.joint_names):
             pos = positions[:, j]

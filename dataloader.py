@@ -1,4 +1,9 @@
 import sys
+
+from lightning.pytorch.utilities.types import EVAL_DATALOADERS
+
+from utils.pymo.preprocessing import MocapParameterizer
+
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 import pickle
 from pathlib import Path
@@ -7,8 +12,11 @@ import lightning as pl
 import smplx
 import torch
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-from smpl2motorica.utils import conti_angle_rep
+from smpl2motorica.utils.pymo.preprocessing import (
+    MocapParameterizer
+)
 from tqdm import tqdm
 from smpl2keypoint import (
     motorica_draw_stickfigure3d,
@@ -17,51 +25,11 @@ from smpl2keypoint import (
     get_SMPL_skeleton_names,
     expand_skeleton,
     motorica2smpl,
+    load_dummy_motorica_data,
+    get_motorica_skeleton_names,
 )
+from keypoint_fk import ForwardKinematics
 
-# class SMPLDataset(Dataset):
-#     def __init__(self, data_dir):
-#         self.data_dir = Path(data_dir)
-#         self.files = sorted(list(self.data_dir.glob("*_smpl.pkl")))
-
-#     def __len__(self):
-#         return len(self.files)
-
-#     def __getitem__(self, idx):
-#         smpl_file = self.files[idx]
-#         with open(smpl_file, "rb") as f:
-#             smpl_data = pickle.load(f)
-#         data_dict = {
-#             "smpl_body_pose": smpl_data["smpl_body_pose"],
-#             "smpl_transl": smpl_data["smpl_transl"],
-#             "smpl_global_orient": smpl_data["smpl_global_orient"],
-#             "smpl_joint_loc": smpl_data["smpl_joint_loc"],
-#         }
-#         return data_dict
-
-# class KeypointDataset(Dataset):
-#     def __init__(self, data_dir):
-#         self.data_dir = Path(data_dir)
-#         self.files = sorted(list(self.data_dir.glob("*_motorica.pkl")))
-
-#     def __len__(self):
-#         return len(self.files)
-
-#     def __getitem__(self, idx):
-#         keypoint_file = self.files[idx]
-#         with open(keypoint_file, "rb") as f:
-#             keypoint_data = pickle.load(f)
-#         data = torch.tensor(keypoint_data.values, dtype=torch.float32) # data shape (num_frames, num_keypoints x 3)
-#         col_name = keypoint_data.columns
-#         # convert degree to radian
-#         data = torch.deg2rad(data)
-
-#         # data shape (num_frames, num_keypoints, 3)
-#         reshaped_euler: torch.Tensor = data.reshape(data.shape[0], -1, 3)
-#         # convert to matrix representation
-#         data_mat = conti_angle_rep.euler_angles_to_matrix(reshaped_euler, convention="XYZ")
-
-#         return data_mat, col_name
 
 class AlignmentDataset(Dataset):
     def __init__(self, data_dir, segment_length=50, force_reprocess=False):
@@ -85,9 +53,12 @@ class AlignmentDataset(Dataset):
         return len(self.all_data) // self.segment_length
 
     def __getitem__(self, idx):
-        # consider the segment length
-        start_idx = idx * self.segment_length
-        end_idx = (idx + 1) * self.segment_length
+        if isinstance(idx, slice):
+            raise NotImplementedError("Slicing is not supported")
+        else:
+            # consider the segment length
+            start_idx = (idx) * self.segment_length
+            end_idx = (idx + 1) * self.segment_length
         data = self.all_data.iloc[start_idx:end_idx]
 
         # smpl col
@@ -97,6 +68,7 @@ class AlignmentDataset(Dataset):
 
         smpl_df = data[smpl_col]
         keypoint_df = data[keypoint_col]
+        sequence_length = len(keypoint_df)
 
         # processing smpl data
         smpl_dict = {
@@ -120,8 +92,9 @@ class AlignmentDataset(Dataset):
 
         # processing keypoint_df: transfer from dataframe to tensor
         keypoint_data = keypoint_df.values
+        keypoint_data = torch.tensor(keypoint_data.reshape(sequence_length, -1, 3), dtype=torch.float32)
         keypoint_col = keypoint_df.columns
-        return keypoint_data, smpl_dict
+        return (keypoint_data, smpl_dict)
 
     def preprocess_one_pair(self, file_path):
         """
@@ -193,14 +166,17 @@ class AlignmentDataset(Dataset):
         )
 
         # reorder the sequence of the columns so that they are in the same order as the smpl data
-        keypoint_column_in_smpl_order = list(motorica2smpl())
-        keypoint_column_in_smpl_order = expand_skeleton(keypoint_column_in_smpl_order)
+        keypoint_order = expand_skeleton(get_motorica_skeleton_names(), "ZXY")
         selected_col = [
             "Hips_Xposition",
             "Hips_Yposition",
             "Hips_Zposition",
-        ] + keypoint_column_in_smpl_order
+        ] + keypoint_order
         keypoint_data = keypoint_data[selected_col]
+        # convert rotation from degree to radian
+        keypoint_data[keypoint_order] = keypoint_data[
+            keypoint_order
+        ].apply(lambda x: np.deg2rad(x))
         keypoint_data.columns = ["keypoint_" + name for name in keypoint_data.columns]
         combined_df = pd.concat([keypoint_data, smpl_df], axis=1)
 
@@ -283,7 +259,174 @@ class AlignmentDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
         )
-    
+    def val_dataloader(self):
+        return  DataLoader(
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=1,
+            collate_fn=self.collate_fn,
+        )
+def get_skeleton():
+    return {
+        "Hips": {
+            "parent": None,
+            "channels": [
+                "Xposition",
+                "Yposition",
+                "Zposition",
+                "Zrotation",
+                "Xrotation",
+                "Yrotation",
+            ],
+            "offsets": np.array([-0.204624, 0.864926, -0.962418]),
+            "order": "ZXY",
+            "children": ["Spine", "LeftUpLeg", "RightUpLeg"],
+        },
+        "Spine": {
+            "parent": "Hips",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.0, 0.0777975, 0.0]),
+            "order": "ZXY",
+            "children": ["Spine1"],
+        },
+        "Spine1": {
+            "parent": "Spine",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-1.57670e-07, 2.26566e-01, 7.36298e-07]),
+            "order": "ZXY",
+            "children": ["Neck", "LeftShoulder", "RightShoulder"],
+        },
+        "Neck": {
+            "parent": "Spine1",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.0, 0.249469, 0.0]),
+            "order": "ZXY",
+            "children": ["Head"],
+        },
+        "Head": {
+            "parent": "Neck",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.0, 0.147056, 0.018975]),
+            "order": "ZXY",
+            "children": [],
+            # "children": ["Head_Nub"],
+        },
+        "LeftShoulder": {
+            "parent": "Spine1",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.037925, 0.208193, -0.0005065]),
+            "order": "ZXY",
+            "children": ["LeftArm"],
+        },
+        "LeftArm": {
+            "parent": "LeftShoulder",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([1.24818e-01, -1.24636e-07, 0.00000e00]),
+            "order": "ZXY",
+            "children": ["LeftForeArm"],
+        },
+        "LeftForeArm": {
+            "parent": "LeftArm",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([2.87140e-01, 1.34650e-07, 6.52025e-06]),
+            "order": "ZXY",
+            "children": ["LeftHand"],
+        },
+        "LeftHand": {
+            "parent": "LeftForeArm",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.234148, 0.00116565, 0.00321146]),
+            "order": "ZXY",
+            "children": [],
+            # "children": [
+            #     "LeftHandThumb1",
+            #     "LeftHandIndex1",
+            #     "LeftHandMiddle1",
+            #     "LeftHandRing1",
+            #     "LeftHandPinky1",
+            # ],
+        },
+        "RightShoulder": {
+            "parent": "Spine1",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-0.0379391, 0.208193, -0.00050652]),
+            "order": "ZXY",
+            "children": ["RightArm"],
+        },
+        "RightArm": {
+            "parent": "RightShoulder",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-0.124818, 0.0, 0.0]),
+            "order": "ZXY",
+            "children": ["RightForeArm"],
+        },
+        "RightForeArm": {
+            "parent": "RightArm",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-2.87140e-01, -3.94596e-07, 1.22370e-06]),
+            "order": "ZXY",
+            "children": ["RightHand"],
+        },
+        "RightHand": {
+            "parent": "RightForeArm",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-0.237607, 0.00081803, 0.00144663]),
+            "order": "ZXY",
+            "children": [],
+            # "children": [
+            #     "RightHandThumb1",
+            #     "RightHandIndex1",
+            #     "RightHandMiddle1",
+            #     "RightHandRing1",
+            #     "RightHandPinky1",
+            # ],
+        },
+        "LeftUpLeg": {
+            "parent": "Hips",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.0948751, 0.0, 0.0]),
+            "order": "ZXY",
+            "children": ["LeftLeg"],
+        },
+        "LeftLeg": {
+            "parent": "LeftUpLeg",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([2.47622e-07, -3.57160e-01, -1.88071e-06]),
+            "order": "ZXY",
+            "children": ["LeftFoot"],
+        },
+        "LeftFoot": {
+            "parent": "LeftLeg",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.00057702, -0.408583, 0.00046285]),
+            "order": "ZXY",
+            "children": [],
+            # "children": ["LeftToeBase"],
+        },
+        "RightUpLeg": {
+            "parent": "Hips",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-0.0948751, 0.0, 0.0]),
+            "order": "ZXY",
+            "children": ["RightLeg"],
+        },
+        "RightLeg": {
+            "parent": "RightUpLeg",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([-2.56302e-07, -3.57160e-01, -2.17293e-06]),
+            "order": "ZXY",
+            "children": ["RightFoot"],
+        },
+        "RightFoot": {
+            "parent": "RightLeg",
+            "channels": ["Zrotation", "Xrotation", "Yrotation"],
+            "offsets": np.array([0.00278006, -0.403849, 0.00049768]),
+            "order": "ZXY",
+            "children": [],
+            # "children": ["RightToeBase"],
+        },
+    }   
 
 def main():
     data_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset")
@@ -300,12 +443,10 @@ def main():
 
     # # For visualization and testing
     keypoint_batch, smpl_batch = alignment_data[0]
-    # # convert from matrix to euler angles
+    # convert from matrix to euler angles
     # keypoint_batch = conti_angle_rep.matrix_to_euler_angles(keypoint_batch, convention="XYZ")
-    # # reshape back to (num_frames, num_keypoints x 3)
-    # keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
-    # # rad to degree
-    # keypoint_batch = torch.rad2deg(keypoint_batch)
+    # reshape back to (num_frames, num_keypoints x 3)
+    keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
 
     # processing SMPL data
     pose = smpl_batch["smpl_body_pose"]
@@ -332,12 +473,18 @@ def main():
             "Hips_Xposition",
             "Hips_Yposition",
             "Hips_Zposition",
-        ]  + expand_skeleton(list(motorica2smpl()))
+        ]  + expand_skeleton(get_motorica_skeleton_names(), "ZXY")
     # remove "smpl_" prefix
     keypoint_col_name = [col.replace("keypoint_", "") for col in keypoint_col_name]
-    keypoint_batch_df = pd.DataFrame(keypoint_batch, columns=keypoint_col_name)
-    position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_batch_df)
+    keypoint_fk = ForwardKinematics()
+    keypoint_pos = keypoint_fk.forward(keypoint_batch)
+    position_df = keypoint_fk.convert_to_dataframe(keypoint_pos)
 
+
+
+    motorica_dummy_data = load_dummy_motorica_data()
+    # motorica_dummy_data.values = keypoint_batch_df
+    motorica_dummy_data.skeleton = get_skeleton()
     # frame to visualize
     frame = 0
     fig = plt.figure(figsize=(15, 10))

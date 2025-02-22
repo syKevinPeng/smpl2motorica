@@ -47,29 +47,33 @@ def get_SMPL_skeleton_names():
     ]
 
 
+# def get_motorica_skeleton_names():
+#     return [
+#         "Head",
+#         "Hips",
+#         "LeftArm",
+#         "LeftFoot",
+#         "LeftForeArm",
+#         "LeftHand",
+#         "LeftLeg",
+#         "LeftShoulder",
+#         # "LeftToeBase",
+#         "LeftUpLeg",
+#         "Neck",
+#         "RightArm",
+#         "RightFoot",
+#         "RightForeArm",
+#         "RightHand",
+#         "RightLeg",
+#         "RightShoulder",
+#         # "RightToeBase",
+#         "RightUpLeg",
+#         "Spine",
+#         "Spine1",
+#     ]
 def get_motorica_skeleton_names():
     return [
-        "Head",
-        "Hips",
-        "LeftArm",
-        "LeftFoot",
-        "LeftForeArm",
-        "LeftHand",
-        "LeftLeg",
-        "LeftShoulder",
-        # "LeftToeBase",
-        "LeftUpLeg",
-        "Neck",
-        "RightArm",
-        "RightFoot",
-        "RightForeArm",
-        "RightHand",
-        "RightLeg",
-        "RightShoulder",
-        # "RightToeBase",
-        "RightUpLeg",
-        "Spine",
-        "Spine1",
+        'Hips', 'Spine', 'LeftUpLeg', 'RightUpLeg', 'Spine1', 'LeftLeg', 'RightLeg', 'Neck', 'LeftShoulder', 'RightShoulder', 'LeftFoot', 'RightFoot', 'Head', 'LeftArm', 'RightArm', 'LeftForeArm', 'RightForeArm', 'LeftHand', 'RightHand'
     ]
 def smpl_motorica_mapping():
     return OrderedDict(
@@ -241,7 +245,7 @@ def motorica_draw_stickfigure3d(
         parent_y = df[f"{joint}_Zposition"].iloc[frame]
         parent_z = df[f"{joint}_Yposition"].iloc[frame]
         ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
-
+        print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
         children_to_draw = [
             c for c in mocap_track.skeleton[joint]["children"] if c in joints_to_draw
         ]
