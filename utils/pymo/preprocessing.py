@@ -270,6 +270,7 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             joints = (joint for joint in track.skeleton)
 
             tree_data = {}
+            quant_list =[]
 
             for joint in track.traverse():
                 # if joint not in joints:
@@ -326,6 +327,7 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
                 quats = Quaternions.from_euler(
                     np.asarray(euler_values), order=rot_order.lower(), world=False
                 )
+                quant_list.append(quats)
 
                 tree_data[joint] = [
                     [],  # to store the rotation matrix
@@ -365,6 +367,10 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
                     ],
                 )
                 pos_df = pd.concat((pos_df, df), axis=1)
+
+            # quant
+            # all_quant = Quaternions(np.concatenate([q.qs for q in quant_list], axis=1))
+            # print(all_quant[0][0].reshape((-1, 4)))
 
             new_track = track.clone()
             new_track.values = pos_df

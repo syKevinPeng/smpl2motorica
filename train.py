@@ -98,9 +98,9 @@ class KeypointModel(pl.LightningModule):
             batch_size=len(pose),
         ).to(self.device)
         smpl_output = smpl_model(
-            global_orient=torch.tensor(global_orient, dtype=torch.float32),
-            body_pose=torch.tensor(pose, dtype=torch.float32),
-            transl=torch.tensor(transl, dtype=torch.float32),
+            global_orient=global_orient,
+            body_pose=pose,
+            transl=transl,
         )
         smpl_joints_loc = smpl_output.joints
         smpl_joints_loc = smpl_joints_loc[:, :24, :] # (batch_size, 24,3)
@@ -183,7 +183,7 @@ class KeypointModel(pl.LightningModule):
         keypoint_rot = keypoint_rot_mat[:, :, 1:, :].view(batch_size,len_of_sequence, -1, 3, 3)
         # convert the rotation matrix to euler angles
         keypoint_rot = pytorch3d.transforms.matrix_to_euler_angles(
-            keypoint_rot, convention="ZXY" # TODO: check the convention
+            keypoint_rot, convention="ZXY" 
         )
         keypoint_euler = torch.cat([keypoint_transl.unsqueeze(2), keypoint_rot], dim=2)
         return keypoint_euler
@@ -216,8 +216,7 @@ class KeypointModel(pl.LightningModule):
             predicted_rot_transl, keypoint_combined, smpl_batch
         )
         self.log('train_loss', loss)
-
-        return loss
+        self.log("epoch_train_loss", loss, on_epoch=True)
 
     def validation_step(self, batch, batch_idx):
         print("Performing Validation Step")
@@ -253,13 +252,55 @@ class KeypointModel(pl.LightningModule):
         # print("keypoint_rot_euler", keypoint_rot_euler[0][0])
         # print("adjusted_keypoint", adjusted_keypoint[0][0])
         # assert torch.allclose(keypoint_rot_euler, adjusted_keypoint, atol=1e-6), "SMPL joint location and adjusted keypoint location are not close enough"
+        self.prediction_visualization(
+            smpl_loc = smpl_joint_loc, 
+            smpl_vertices = smpl_vertices, 
+            keypoint_loc=keypoint_rot_loc, 
+            predicted_loc=adjusted_keypoint_loc, 
+            output_path="validate_keypoint.png")
+        
+    def predict_step(self, batch, batch_idx):
+        prediction_output_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/prediction_result")
+        if not prediction_output_dir.exists():
+            prediction_output_dir.mkdir(parents=True)
 
-        self.prediction_visualization(smpl_loc = smpl_joint_loc, smpl_vertices = smpl_vertices, keypoint_loc=keypoint_rot_loc, predicted_loc=adjusted_keypoint_loc)
-        exit()
-        return adjusted_keypoint_loc
-    
-    
-    
+        keypoint_rot_euler, smpl_batch = batch
+        file_name = smpl_batch["name"]
+        padding_mask = smpl_batch["padding_mask"]
+        # remove padding mask from batch
+        del smpl_batch["name"]
+        batch_size = keypoint_rot_euler.shape[0]
+        keypoint_rot_mat = self.keypoint_to_rot_mat(keypoint_rot_euler).to(
+            self.device
+        ) #(batch_size, seq_length, 1+19, 9)
+
+        smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
+        smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=True)
+        smpl_joint_loc = smpl_joint_loc.reshape(batch_size, -1, 24, 3)
+        smpl_vertices = smpl_vertices.reshape(batch_size, -1, 6890, 3)
+
+        predicted_rot_transl = self.model(keypoint_rot_mat)
+        adjusted_keypoint = self.apply_prediction_to_keypoint(
+            predicted_rot_transl, keypoint_rot_mat
+        ) # (batch_size, len_of_sequence, 20, 3)
+        keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
+        adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
+        # reshape back to batch_size, len_of_sequence, 20, 3
+        keypoint_rot_loc = keypoint_rot_loc.view(batch_size, -1, 19, 3)
+        adjusted_keypoint_loc = adjusted_keypoint_loc.view(batch_size, -1, 19, 3)
+        padding_mask = np.repeat(padding_mask.cpu().numpy(), 19 * 3, axis=1).reshape(batch_size, -1, 19, 3)
+        # adjusted_keypoint_loc = adjusted_keypoint_loc[~padding_mask]
+        # keypoint_rot_loc = keypoint_rot_loc[~padding_mask]
+        for i in range(batch_size):
+            self.prediction_visualization(
+                smpl_loc = smpl_joint_loc[i], 
+                smpl_vertices = smpl_vertices[i], 
+                keypoint_loc=keypoint_rot_loc[i], 
+                predicted_loc=adjusted_keypoint_loc[i], 
+                output_path=str(prediction_output_dir/file_name[0])+".png")
+            exit()
+
+
     def visualize_keypoint_data(self,ax, frame: int, df: pd.DataFrame, skeleton = None):
         if skeleton is None:
             skeleton = self.keypoint_fk.get_skeleton()
@@ -303,28 +344,27 @@ class KeypointModel(pl.LightningModule):
         return ax
     
     # visualize the prediction
-    def prediction_visualization(self, smpl_loc,smpl_vertices, keypoint_loc, predicted_loc, frame_to_visualize = 0):
+    def prediction_visualization(self, smpl_loc,smpl_vertices, keypoint_loc, predicted_loc, frame_to_visualize = 0, output_path = "predicted_keypoint.png"):
         fig = plt.figure(figsize=(30, 10))
-        input_data_pos_df = self.keypoint_fk.convert_to_dataframe(keypoint_loc)
-        # show all df columns
-        input_loc_ax = fig.add_subplot(132, projection="3d")
-        input_loc_ax = self.visualize_keypoint_data(input_loc_ax, frame_to_visualize, input_data_pos_df)
-        motorica_dummy_data = load_dummy_motorica_data()
-        # motorica_dummy_data.values = keypoint_batch_df
-        motorica_dummy_data.skeleton = self.keypoint_fk.get_skeleton()
+        # input_data_pos_df = self.keypoint_fk.convert_to_dataframe(keypoint_loc)
+        # # show all df columns
+        # input_loc_ax = fig.add_subplot(132, projection="3d")
+        # input_loc_ax = self.visualize_keypoint_data(input_loc_ax, frame_to_visualize, input_data_pos_df)
+        # motorica_dummy_data = load_dummy_motorica_data()
+        # # motorica_dummy_data.values = keypoint_batch_df
+        # motorica_dummy_data.skeleton = self.keypoint_fk.get_skeleton()
         
-        input_loc_ax.set_title("Input Keypoint")
-        input_loc_ax.set_xlabel('X axis')
-        input_loc_ax.set_ylabel('Y axis')
-        input_loc_ax.set_zlabel('Z axis')
-        input_loc_ax.set_box_aspect([1, 1, 1])
-        input_loc_ax.set_xlim([-1, 1])
-        input_loc_ax.set_ylim([-1, 1])
-        input_loc_ax.set_zlim([-1, 1])
-
+        # input_loc_ax.set_title("Input Keypoint")
+        # input_loc_ax.set_xlabel('X axis')
+        # input_loc_ax.set_ylabel('Y axis')
+        # input_loc_ax.set_zlabel('Z axis')
+        # input_loc_ax.set_box_aspect([1, 1, 1])
+        # input_loc_ax.set_xlim([-1, 1])
+        # input_loc_ax.set_ylim([-1, 1])
+        # input_loc_ax.set_zlim([-1, 1])
 
         predicted_position = self.keypoint_fk.convert_to_dataframe(predicted_loc)
-        predicted_loc_ax = fig.add_subplot(133, projection="3d")
+        predicted_loc_ax = fig.add_subplot(132, projection="3d")
         predicted_loc_ax = self.visualize_keypoint_data(predicted_loc_ax, frame_to_visualize, predicted_position)
         predicted_loc_ax.set_title("Predicted Keypoint")
         predicted_loc_ax.set_xlabel('X axis')
@@ -350,13 +390,24 @@ class KeypointModel(pl.LightningModule):
         smpl_ax.set_ylim([-1, 1])
         smpl_ax.set_zlim([-1, 1])
 
+        # overlay the predicted keypoint on the smpl model
+        overlayed_ax = fig.add_subplot(133, projection="3d")
+        overlayed_ax = SMPL_visulize_a_frame(overlayed_ax, smpl_loc[frame_to_visualize], smpl_vertices[frame_to_visualize], smpl_model)
+        overlayed_ax = self.visualize_keypoint_data(overlayed_ax, frame_to_visualize, predicted_position)
+        overlayed_ax.set_title("Overlayed Keypoint")
+        overlayed_ax.set_xlabel('X axis')
+        overlayed_ax.set_ylabel('Y axis')
+        overlayed_ax.set_zlabel('Z axis')
+        overlayed_ax.set_xlim([-1, 1])
+        overlayed_ax.set_ylim([-1, 1])
+        overlayed_ax.set_zlim([-1, 1])
 
-        plt.savefig("predicted_keypoint.png")
+        plt.savefig(output_path)
 
         
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-5)
         return optimizer
     
     def apply_prediction_to_keypoint(self, predicted_rot_transl, keypoint_batch):
@@ -414,29 +465,48 @@ class KeypointModel(pl.LightningModule):
         smpl_loc = self.smpl_forward_kinematics(smpl_batch)
         # calculate the loss
         loss = self.mse_loss(adjusted_keypoint_loc.reshape(batch_size*len_of_sequence,-1), smpl_loc)
-        return loss
+        return loss 
 
 
 def main():
+    mode = "predict"
+    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/smpl2keypoint-epoch=04-train_loss=0.29.ckpt")
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
+    # mode = "validate"
+    # mode = "predict"
+
+
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 2
+    batch_size = 1
     num_workers = 4
-    # torch.autograd.set_detect_anomaly(True)
-    data_module = AlignmentDataModule(data_dir, batch_size, num_workers)
+
+
+    data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                          name="test1",
+                                name="train_1",
+                                mode = "disabled"
                                           )
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='train_loss',
         dirpath='/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints',
         filename='smpl2keypoint-{epoch:02d}-{train_loss:.2f}',
         mode='min',
+        every_n_epochs=5  # Save every 10 epochs
     )
-    trainer = Trainer(max_epochs=500, logger=wandb_logger)
-    trainer.fit(model, data_module.train_dataloader())
-    # trainer.validate(model, data_module.val_dataloader())
+    trainer = Trainer(max_epochs=500, logger=wandb_logger, callbacks = [checkpoint_callback])
+    if mode == "train":
+        trainer.fit(model, data_module.train_dataloader())
+    elif mode == "validate":
+        trainer.validate(model, data_module.val_dataloader())
+    elif mode == "predict":
+        print(f'Loading model from {ckpt}')
+        model = KeypointModel.load_from_checkpoint(checkpoint_path=str(ckpt))
+        trainer.predict(model, data_module.predict_dataloader())
+    else:
+        raise ValueError("Invalid mode. Choose from 'train', 'validate', or 'predict'.")
 
 
 if __name__ == "__main__":
@@ -444,14 +514,14 @@ if __name__ == "__main__":
 
     # # test euler to rotation matrix and then back to euler
     # euler = torch.rand(2, 1, 20, 3)* np.pi
-    # euler = (euler + np.pi) % (2 * np.pi) - np.pi
+    # # euler = (euler + np.pi) % (2 * np.pi) - np.pi
     # # model = KeypointModel()
     # # rot_mat = model.keypoint_to_rot_mat(euler)
     # # euler_back = model.rot_mat_to_keypoint(rot_mat)
     # rot_mat = pytorch3d.transforms.euler_angles_to_matrix(euler, convention="ZXY")
     # euler_back = pytorch3d.transforms.matrix_to_euler_angles(rot_mat, convention="ZXY")
 
-    # euler_back = (euler_back + np.pi) % (2 * np.pi) - np.pi
+    # # euler_back = (euler_back + np.pi) % (2 * np.pi) - np.pi
 
     # print(euler - euler_back)
     # assert torch.allclose(euler, euler_back, atol=1e-4), "euler and euler_back are not close enough"
