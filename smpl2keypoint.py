@@ -606,7 +606,6 @@ if __name__ == "__main__":
         rotated_root_trans = smpl_root_rot.apply(root_trans)
         # rotated_root_trans += pelvis_offset
         rotated_root_trans = torch.tensor(rotated_root_trans, dtype=torch.float32)
-        print(f'rotated_smpl_root_rot: {rotated_smpl_root_rot}')
 
 
         smpl_model = smplx.create(
