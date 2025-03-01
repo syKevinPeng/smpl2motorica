@@ -493,27 +493,38 @@ def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
         )
     return ax
 
-def save_video(data):
-    df = data.values
+def save_video(motorica_df, smpl_in_motorica_df, output_file_name = 'sample_motorica_vid.mp4'):
     image_folder = 'tmp'
     os.makedirs(image_folder, exist_ok=True)
     
-    for frame in tqdm(range(len(df)), desc="Generating Videos"):
-        fig = plt.figure(figsize=(10, 10))
-        motorica_ax = fig.add_subplot(111, projection='3d')
-        motorica_ax = visualize_keypoint_data(motorica_ax, frame, df )
+    for frame in tqdm(range(len(motorica_df)), desc="Generating Videos"):
+        fig = plt.figure(figsize=(10, 20))
+        motorica_ax = fig.add_subplot(121, projection='3d')
+        motorica_ax = visualize_keypoint_data(motorica_ax, frame, motorica_df )
         motorica_ax.set_xlabel('X axis')
         motorica_ax.set_ylabel('Y axis')
         motorica_ax.set_zlabel('Z axis')
         motorica_ax.set_zlim([-1, 1])
         motorica_ax.set_xlim([-1, 1])
         motorica_ax.set_ylim([-1, 1])
-        motorica_ax.set_title(f"frame {frame}")
+        motorica_ax.set_title(f"motorica: frame {frame}")
+
+        smpl_in_motorica_ax = fig.add_subplot(122, projection='3d')
+        smpl_in_motorica_ax = visualize_keypoint_data(smpl_in_motorica_ax, frame, smpl_in_motorica_df)
+        smpl_in_motorica_ax.set_xlabel('X axis')
+        smpl_in_motorica_ax.set_ylabel('Y axis')
+        smpl_in_motorica_ax.set_zlabel('Z axis')
+        smpl_in_motorica_ax.set_zlim([-1, 1])
+        smpl_in_motorica_ax.set_xlim([-1, 1])
+        smpl_in_motorica_ax.set_ylim([-1, 1])
+        smpl_in_motorica_ax.set_title(f"smpl_in_motorica frame {frame}")
+        motorica_ax.view_init(elev=0, azim=90)
+        smpl_in_motorica_ax.view_init(elev=0, azim=90)
         plt.savefig(f"{image_folder}/frame_{frame:04d}.png")
         plt.close(fig)
     
     # compile the video
-    video_name = 'sample_motorica_vid.mp4'
+    video_name = output_file_name
     images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
     frame = cv2.imread(os.path.join(image_folder, images[0]))
     height, width, layers = frame.shape
@@ -539,7 +550,7 @@ def save_video(data):
 if __name__ == "__main__":
     dataset_fps = 60
     target_fps = 30
-    debug = True  # debug flag
+    debug = False  # debug flag
     aist_data_root = Path("/fs/nexus-projects/PhysicsFall/data/AIST++/motions-SMPL")
     smpl_model_path = Path("/fs/nexus-projects/PhysicsFall/data/smpl/models")
     output_dir = Path("./data/alignment_dataset")
@@ -577,26 +588,25 @@ if __name__ == "__main__":
         smpl_body_pose = poses[:, 3:]
         smpl_root_rot = poses[:, :3]
         # apply pelvis offset
-        pelvis_offset = get_smpl_pelvis_offset(global_trans=root_trans, global_rot=smpl_root_rot, joint_rot=smpl_body_pose)
-        root_trans = root_trans - pelvis_offset
+        # pelvis_offset = get_smpl_pelvis_offset(global_trans=root_trans, global_rot=smpl_root_rot, joint_rot=smpl_body_pose)
+        # root_trans = root_trans - pelvis_offset
 
         smpl_root_rot = torch.tensor(smpl_root_rot, dtype=torch.float32)
         smpl_body_pose = torch.tensor(smpl_body_pose, dtype=torch.float32)
         smpl_root_trans = torch.tensor(root_trans, dtype=torch.float32)
 
         # rotate the SMPL pose to Motorica Pose
-        smpl_root_rot_quat = R.from_euler("xyz", smpl_root_rot, degrees=False)
+        smpl_root_rot = R.from_euler("xyz", smpl_root_rot, degrees=False)
         rot_offset = R.from_euler("z",  -np.pi / 2, degrees=False)
         additiona_rot_offset = R.from_euler("x", -np.pi / 2 , degrees=False)
-        smpl_root_rot_quat = additiona_rot_offset * rot_offset * smpl_root_rot_quat
-        rotated_smpl_root_rot = smpl_root_rot_quat.as_rotvec()
+        smpl_root_rot = additiona_rot_offset * rot_offset * smpl_root_rot
+        rotated_smpl_root_rot = smpl_root_rot.as_rotvec()
         rotated_smpl_root_rot = torch.tensor(rotated_smpl_root_rot, dtype=torch.float32)
         # # Rotate the body translation as well
-        rotated_root_trans = rot_offset.apply(root_trans)
-        rotated_root_trans += pelvis_offset
+        rotated_root_trans = smpl_root_rot.apply(root_trans)
+        # rotated_root_trans += pelvis_offset
         rotated_root_trans = torch.tensor(rotated_root_trans, dtype=torch.float32)
-
-
+        print(f'rotated_smpl_root_rot: {rotated_smpl_root_rot}')
 
 
         smpl_model = smplx.create(
@@ -633,76 +643,10 @@ if __name__ == "__main__":
         # rename the columns to motorica joint names
         keypoint_smpl_df.columns = expand_skeleton(get_motorica_skeleton_names())
 
-        # rotate the pelvis
-        pelvis = keypoint_smpl_df[
-            ["Hips_Xrotation", "Hips_Yrotation", "Hips_Zrotation"]
-        ].values
-        pelvis_rot = R.from_euler("xyz", pelvis, degrees=True)
-        # pelvis_rot_offset = R.from_euler("xyz", [0, 180, 0], degrees=True)
-        pelvis_rot_offset = R.from_euler("xyz", [0, 0, 0], degrees=True)
-        # pelvis_rot = pelvis_rot_offset * pelvis_rot
-        pelvis_rot_euler = pelvis_rot.as_euler("xyz", degrees=True)
-        keypoint_smpl_df[["Hips_Xrotation", "Hips_Yrotation", "Hips_Zrotation"]] = (
-            pelvis_rot_euler
-        )
+        # add root position
+        root_pose_df = pd.DataFrame(root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"])
+        keypoint_smpl_df = pd.concat([root_pose_df, keypoint_smpl_df], axis=1)
 
-        # body_rot_name = list(keypoint_smpl_df.columns)
-        # body_rot_name.remove("Hips_Xrotation")
-        # body_rot_name.remove("Hips_Yrotation")
-        # body_rot_name.remove("Hips_Zrotation")
-
-        # # Flip left and right
-        # joint_rot = keypoint_smpl_df[body_rot_name].values
-        # joint_rot = np.deg2rad(joint_rot)
-        # num_frame, num_joint, _ = joint_rot.reshape(len(joint_rot), -1, 3).shape
-        # joint_rot = joint_rot.reshape(-1, 3)
-
-        # joint_matrices = R.from_rotvec(joint_rot).as_matrix()
-
-        # reflection_matrix = np.array(
-        #     [[-1, 0, 0], [0, 1, 0], [0, 0, 1]]
-        # )  # mirror aross Y-Z plane
-        # # reflection_matrix = np.identity(3)
-        # reflected_matrices = reflection_matrix @ joint_matrices @ reflection_matrix.T
-        # reflected_poses = R.from_matrix(reflected_matrices).as_rotvec()
-        # reflected_poses = reflected_poses.reshape(num_frame, -1)
-        # # convert back to degree
-        # reflected_poses = np.rad2deg(reflected_poses)
-        # keypoint_smpl_df[body_rot_name] = reflected_poses.astype(np.float32)
-
-        # # left side joints
-        # left_side_joints = [
-        #     "LeftArm",
-        #     "LeftForeArm",
-        #     "LeftHand",
-        #     "LeftLeg",
-        #     "LeftFoot",
-        #     "LeftShoulder",
-        #     "LeftUpLeg",
-        # ]
-        # right_side_joints = [
-        #     "RightArm",
-        #     "RightForeArm",
-        #     "RightHand",
-        #     "RightLeg",
-        #     "RightFoot",
-        #     "RightShoulder",
-        #     "RightUpLeg",
-        # ]
-        # left_side_joints = expand_skeleton(left_side_joints)
-        # right_side_joints = expand_skeleton(right_side_joints)
-        # # swap left and right joints
-        # keypoint_smpl_df[left_side_joints], keypoint_smpl_df[right_side_joints] = (
-        #     keypoint_smpl_df[right_side_joints],
-        #     keypoint_smpl_df[left_side_joints].values,
-        # )
-
-        # # add root position
-        # root_pos_df = pd.DataFrame(
-        #     root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]
-        # )
-        # new_df = pd.concat([root_pos_df, keypoint_smpl_df], axis=1)
-        new_df = keypoint_smpl_df
 
         # save human pose
         motorica_output_file = output_dir / f"{data_file.stem}_motorica.pkl"
@@ -715,19 +659,15 @@ if __name__ == "__main__":
         }
         if not debug:
             with open(motorica_output_file, "wb") as f:
-                pickle.dump(new_df, f)
+                pickle.dump(keypoint_smpl_df, f)
 
             with open(smpl_output_file, "wb") as f:
                 pickle.dump(smpl_data_dict, f)
 
         # TODO visualize a frame
         if debug:
-            # motorica_dummy_data.values = new_df
-            # position_mocap = MocapParameterizer("position").fit_transform(
-            #     [motorica_dummy_data]
-            # )[0]
-            # position_df = position_mocap.values
-            position_df, motorica_dummy_data = motorica_forward_kinematics(new_df)
+
+            position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_smpl_df)
 
             vis_frame = 0
             fig = plt.figure(figsize=(30, 10))
@@ -758,7 +698,6 @@ if __name__ == "__main__":
             ax_smpl.set_xlim(-1, 1)
             ax_smpl.set_ylim(-1, 1)
             ax_smpl.set_zlim(-1, 1)
-            ax_smpl.scatter(0, 0, 0, c="black", s=30, marker="*")  # 'o' is a circle marker
 
 
 
@@ -792,16 +731,15 @@ if __name__ == "__main__":
             smpl_loc_ax.set_xlabel("X")
             smpl_loc_ax.set_ylabel("Y")
             smpl_loc_ax.set_zlabel("Z")
-            # mark the origin
-            smpl_loc_ax.scatter(0, 0, 0, c="red", s=10, marker="o")
 
             smpl_loc_ax.set_xlim(-1,1)
             smpl_loc_ax.set_ylim(-1, 1)
             smpl_loc_ax.set_zlim(-1, 1)
             
 
-            # ax_motorica.view_init(elev=0, azim=120)
-            # ax_smpl.view_init(elev=0, azim=120)
-            # smpl_loc_ax.view_init(elev=0, azim=120)
-            fig.savefig(f"smpl_frame_{vis_frame:04d}.png")
+            ax_motorica.view_init(elev=0, azim=90)
+            ax_smpl.view_init(elev=0, azim=90)
+            smpl_loc_ax.view_init(elev=0, azim=90)
+            # fig.savefig(f"smpl_frame_{vis_frame:04d}.png")
+            save_video(position_df, smpl_loc_df, output_file_name=f"{data_file.stem}_motorica.mp4")
             exit()
