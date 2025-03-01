@@ -20,9 +20,10 @@ from smpl2motorica.utils import conti_angle_rep
 from smpl2motorica.smpl2keypoint import (
     load_dummy_motorica_data,
     get_SMPL_skeleton_names,
+    motorica_to_smpl_mapping,
     expand_skeleton,
     get_motorica_skeleton_names,
-    smpl_motorica_mapping,
+    smpl_to_motorica_mapping,
     SMPL_visulize_a_frame,
     motorica_draw_stickfigure3d
 )
@@ -112,9 +113,13 @@ class KeypointModel(pl.LightningModule):
             return smpl_joints_loc, smpl_verts
         # only select the joint we needed
         smpl_joint_names = get_SMPL_skeleton_names()
-        selected_joints = list(smpl_motorica_mapping().keys())
+        # smpl_df = pd.DataFrame(smpl_joints_loc.reshap(smpl_joints_loc.shape[0], -1), columns=expand_skeleton(smpl_joint_names))
+        # print(f'smpl_df')
+        # convert from keypoint to smpl joint
         # if smpl_joint_name is in selected_joints, then keep the joint
-        smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in selected_joints],:].reshape(-1, len(selected_joints)*3)
+        smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+        # swap from XYZ to ZXY
+        smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
         return smpl_joints_loc
 
     def keypoint_to_rot_mat(self, keypoint_data: torch.tensor):
@@ -189,13 +194,16 @@ class KeypointModel(pl.LightningModule):
         return keypoint_euler
 
     def keypoint_forward_kinematics(self, keypoint_data):
+
         # keypoint data contains the translation and rotation of the keypoints
         # first 3 columns are the translation, and the rest are the rotation that have the same order as motorica2smpl
         # merge the batch dimension with the len_of_sequence dimension
         # input size: (batch_size, len_of_sequence, 20, 3)
+        # output size: (batch_size, len_of_sequence, 20, 3)
         batch_size, len_of_sequence, num_joints = keypoint_data.shape[:3]
         keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, 3)
         keypoint_position = self.keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+        keypoint_position = keypoint_position.reshape(batch_size, len_of_sequence, -1, 3)
         return keypoint_position
 
     def smpl_dict_to_cuda(self, smpl_dict):
@@ -221,17 +229,11 @@ class KeypointModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         print("Performing Validation Step")
         print(f'WARNING: FOR DEBUGGING ONLY; MODEL ONLY RETURN IDENTITY MATRIX')
-        #for testing only
         keypoint_rot_euler, smpl_batch = batch
-        # check if euler is in radian
-        # assert torch.max(keypoint_rot_euler) <= 3.14, "keypoint rotation is not in radian"
-        # keypoint_rot_euler = torch.rand_like(keypoint_rot_euler)
+        batch_size, len_of_sequence, _, _ = keypoint_rot_euler.shape
         keypoint_rot_mat = self.keypoint_to_rot_mat(keypoint_rot_euler).to(
             self.device
         ) #(batch_size, seq_length, 1+19, 9)
-
-        # converted_back = self.rot_mat_to_keypoint(keypoint_rot_mat)
-        # assert torch.allclose(keypoint_rot_euler, converted_back, atol=1e-4), "keypoint rotation and converted back keypoint rotation are not close enough"
 
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
         smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=True)
@@ -242,22 +244,35 @@ class KeypointModel(pl.LightningModule):
         predicted_rot_transl[:, :, 1:, :] = torch.eye(3).view(1, 1, 1, 9).repeat(
             predicted_rot_transl.shape[0],predicted_rot_transl.shape[1], 19, 1
         )
-        adjusted_keypoint = self.apply_prediction_to_keypoint(
-            predicted_rot_transl, keypoint_rot_mat
-        ) # (batch_size, len_of_sequence, 20, 3)
-        keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
-        adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
+        # adjusted_keypoint = self.apply_prediction_to_keypoint(
+        #     predicted_rot_transl, keypoint_rot_mat
+        # ) # (batch_size, len_of_sequence, 20, 3)
+        # keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
+        # adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
+
+        loss = self.loss(
+            predicted_rot_transl, keypoint_rot_mat, smpl_batch, reg_weight=0
+        )
 
         # keypoint_rot_euler should have the same value adjusted_keypoint_loc. Check their values
         # print("keypoint_rot_euler", keypoint_rot_euler[0][0])
         # print("adjusted_keypoint", adjusted_keypoint[0][0])
         # assert torch.allclose(keypoint_rot_euler, adjusted_keypoint, atol=1e-6), "SMPL joint location and adjusted keypoint location are not close enough"
-        self.prediction_visualization(
-            smpl_loc = smpl_joint_loc, 
-            smpl_vertices = smpl_vertices, 
-            keypoint_loc=keypoint_rot_loc, 
-            predicted_loc=adjusted_keypoint_loc, 
-            output_path="validate_keypoint.png")
+        # self.prediction_visualization(
+        #     smpl_loc = smpl_joint_loc, 
+        #     smpl_vertices = smpl_vertices, 
+        #     keypoint_loc=keypoint_rot_loc, 
+        #     predicted_loc=adjusted_keypoint_loc, 
+        #     output_path="validate_keypoint.png")
+        # adjusted_keypoint_loc = adjusted_keypoint_loc.reshape(batch_size*len_of_sequence,-1)
+        # smpl_joint_loc
+        # print(f'adjusted_keypoint_loc shape: {adjusted_keypoint_loc.shape}')
+        # print(f'smpl_joint_loc shape: {smpl_joint_loc.shape}')
+        # # calculate the MPJP loss on uncalibrated poses
+        # loss = self.mse_loss(adjusted_keypoint_loc, smpl_joint_loc)
+        self.log('val_loss', loss)
+        self.log("epoch_val_loss", loss, on_epoch=True)
+        
         
     def predict_step(self, batch, batch_idx):
         prediction_output_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/prediction_result")
@@ -453,7 +468,7 @@ class KeypointModel(pl.LightningModule):
         return predicted_keypoint
 
     def loss(
-        self, predicted_rot_transl, keypoint_batch, smpl_batch
+        self, predicted_rot_transl, keypoint_batch, smpl_batch, reg_weight=1
     ):
         batch_size = keypoint_batch.shape[0]
         len_of_sequence = keypoint_batch.shape[1]
@@ -462,23 +477,46 @@ class KeypointModel(pl.LightningModule):
         ) # (batch_size, len_of_sequence, 20, 3)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
         # apply forward kinematics to the smpl data
-        smpl_loc = self.smpl_forward_kinematics(smpl_batch)
+        smpl_loc = self.smpl_forward_kinematics(smpl_batch).reshape(batch_size, -1, 19, 3)
+        
         # calculate the loss
-        loss = self.mse_loss(adjusted_keypoint_loc.reshape(batch_size*len_of_sequence,-1), smpl_loc)
-        return loss 
+        mpjpe_loss = self.mse_loss(adjusted_keypoint_loc, smpl_loc)
+
+        # regularization term
+        reg_weight = 1
+        rot_mat = predicted_rot_transl[:, :, 1:, :].view(batch_size, len_of_sequence, 19, 3, 3)
+        identity_mat = torch.eye(3).view(1, 1, 1, 3, 3).repeat(
+            batch_size, len_of_sequence, 19, 1, 1
+        ).to(self.device)
+        reg_loss = reg_weight * torch.norm(rot_mat - identity_mat, p="fro", dim=(-2, -1)).mean()
+
+        # for debugging only visualize two skeletons
+        adjusted_keypoint_loc_df = self.keypoint_fk.convert_to_dataframe(adjusted_keypoint_loc.reshape(-1, 19, 3))
+        fig = plt.figure(figsize=(20, 10))
+        input_loc_ax = fig.add_subplot(121, projection="3d")
+        input_loc_ax = self.visualize_keypoint_data(input_loc_ax, 0, adjusted_keypoint_loc_df)
+        input_loc_ax.set_title("Adjusted Keypoint")
+        smpl_loc_df = self.keypoint_fk.convert_to_dataframe(smpl_loc.reshape(-1, 19, 3))
+        smpl_loc_ax = fig.add_subplot(122, projection="3d")
+        smpl_loc_ax = self.visualize_keypoint_data(smpl_loc_ax, 0, smpl_loc_df)
+        smpl_loc_ax.set_title("SMPL Model")
+
+        fig.savefig("debugging_fig.png")
+        exit()
+        return mpjpe_loss + reg_loss
 
 
 def main():
-    mode = "predict"
+    # mode = "predict"
     ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/smpl2keypoint-epoch=04-train_loss=0.29.ckpt")
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
-    # mode = "validate"
-    # mode = "predict"
+    mode = "validate"
+    # mode = "train"
 
 
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 1
+    batch_size = 16
     num_workers = 4
 
 
@@ -486,17 +524,21 @@ def main():
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_1",
+                                name="train_3_with_reg",
                                 mode = "disabled"
                                           )
+    saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
+    exp_id = wandb_logger.experiment.id
+    if not (saving_dir/exp_id).exists():
+        (saving_dir/exp_id).mkdir(parents=True)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='train_loss',
-        dirpath='/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints',
+        dirpath=str(saving_dir/exp_id),
         filename='smpl2keypoint-{epoch:02d}-{train_loss:.2f}',
         mode='min',
         every_n_epochs=5  # Save every 10 epochs
     )
-    trainer = Trainer(max_epochs=500, logger=wandb_logger, callbacks = [checkpoint_callback])
+    trainer = Trainer(max_epochs=300, logger=wandb_logger, callbacks = [checkpoint_callback])
     if mode == "train":
         trainer.fit(model, data_module.train_dataloader())
     elif mode == "validate":

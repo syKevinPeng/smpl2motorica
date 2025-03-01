@@ -27,6 +27,7 @@ from smpl2keypoint import (
     motorica2smpl,
     load_dummy_motorica_data,
     get_motorica_skeleton_names,
+    motorica_to_smpl_mapping
 )
 from keypoint_fk import ForwardKinematics
 
@@ -34,8 +35,8 @@ from keypoint_fk import ForwardKinematics
 class AlignmentDataset(Dataset):
     def __init__(self, data_dir, segment_length=50, force_reprocess=False, mode = "train"):
         self.mode = mode
-        if mode not in ["train", "val", "predict"]:
-            raise ValueError("mode should be one of ['train', 'val', 'predict']")
+        if mode not in ["train", "validate", "predict"]:
+            raise ValueError("mode should be one of ['train', 'validate', 'predict']")
         self.data_dir = Path(data_dir)
         self.smpl_files = sorted(list(self.data_dir.glob("*_smpl.pkl")))
         self.keypoint_files = sorted(list(self.data_dir.glob("*_motorica.pkl")))
@@ -51,8 +52,9 @@ class AlignmentDataset(Dataset):
             print("Preprocessing data")
             self.all_data = self.preprocess_data()
             self.save_all_data(self.processed_file_save_path)
-        if self.mode == "val":
-            self.all_data = self.all_data.iloc[:100]
+        if self.mode == "validate":
+            # self.all_data = self.all_data.iloc[:100]
+            self.all_data = self.all_data
         if self.mode == "predict":
             self.all_data = self.keypoint_files
             self.get_longest_sequence_length()
@@ -61,7 +63,7 @@ class AlignmentDataset(Dataset):
         return len(self.all_data) // self.segment_length
 
     def __getitem__(self, idx):
-        if self.mode == "train" or self.mode == "val":
+        if self.mode == "train" or self.mode == "validate":
             if isinstance(idx, slice):
                 raise NotImplementedError("Slicing is not supported")
             else:
@@ -101,7 +103,7 @@ class AlignmentDataset(Dataset):
 
             # processing keypoint_df: transfer from dataframe to tensor
             keypoint_data = keypoint_df.values
-            keypoint_data = torch.tensor(keypoint_data.reshape(sequence_length, -1, 3), dtype=torch.float32)
+            keypoint_data = keypoint_data.reshape(sequence_length, -1, 3)
             keypoint_col = keypoint_df.columns
             return (keypoint_data, smpl_dict)
         
@@ -271,15 +273,15 @@ class AlignmentDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.mode = mode
-        if self.mode not in ["train", "val", "predict"]:
-            raise ValueError("mode should be one of ['train', 'val', 'predict']")
+        if self.mode not in ["train", "validate", "predict"]:
+            raise ValueError("mode should be one of ['train', 'validate', 'predict']")
         self.setup()
 
     def setup(self, stage=None):
         if self.mode == "train":
             self.train_dataset = AlignmentDataset(self.data_dir)
-        elif self.mode == "val":
-            self.val_dataset = AlignmentDataset(self.data_dir, mode="val")
+        elif self.mode == "validate":
+            self.val_dataset = AlignmentDataset(self.data_dir, mode="validate")
         elif self.mode == "predict":
             self.predict_dataset = AlignmentDataset(self.data_dir, mode="predict")
         
@@ -374,39 +376,109 @@ def main():
     #     keypoint_batch, keypoint_col_name, smpl_batch = alignment_data[i]
 
     # # For visualization and testing
-    for keypoint_batch, smpl_batch in alighment_dataset:
-        print(keypoint_batch.shape)
-        print(smpl_batch["smpl_body_pose"].shape)
+    for keypoint_data, smpl_batch in alighment_dataset:
         break
 
 
+    keypoint_fk = ForwardKinematics()
 
-
+    batch_size, len_of_sequence, _ = smpl_batch["smpl_body_pose"].shape
     # # convert from matrix to euler angles
     # # keypoint_batch = conti_angle_rep.matrix_to_euler_angles(keypoint_batch, convention="XYZ")
     # # reshape back to (num_frames, num_keypoints x 3)
     # keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
 
     # # processing SMPL data
-    # pose = smpl_batch["smpl_body_pose"]
-    # transl = smpl_batch["smpl_transl"]
-    # global_orient = smpl_batch["smpl_global_orient"]
+    pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
+    transl = smpl_batch["smpl_transl"].reshape(-1, 3)
+    global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
 
-    # smpl_model = smplx.create(
-    #     model_path=smpl_model_path,
-    #     model_type="smpl",
-    #     return_verts=True,
-    #     batch_size=len(pose),
-    # )
-    # smpl_output = smpl_model(
-    #     global_orient=torch.tensor(global_orient, dtype=torch.float32),
-    #     body_pose=torch.tensor(pose, dtype=torch.float32),
-    #     transl=torch.tensor(transl, dtype=torch.float32),
-    # )
-    # smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
-    # smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
-    # smpl_joints_loc = smpl_joints_loc[:, :24, :]
+    smpl_model = smplx.create(
+        model_path=smpl_model_path,
+        model_type="smpl",
+        return_verts=True,
+        batch_size=len(pose),
+    )
+    smpl_output = smpl_model(
+        global_orient=torch.tensor(global_orient, dtype=torch.float32),
+        body_pose=torch.tensor(pose, dtype=torch.float32),
+        transl=torch.tensor(transl, dtype=torch.float32),
+    )
+    smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
+    smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
+    smpl_joints_loc = smpl_joints_loc[:, :24, :]
+    smpl_joint_names = get_SMPL_skeleton_names()
+    smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+        # swap from XYZ to ZXY
+    smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
 
+    batch_size, len_of_sequence, num_joints = keypoint_data.shape[:3]
+    keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, 3)
+    keypoint_position = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+    keypoint_position = keypoint_position.reshape(batch_size, len_of_sequence, -1, 3)
+    keypoint_rot_loc = keypoint_position.view(batch_size, -1, 19, 3)
+
+    def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
+        if skeleton is None:
+            skeleton = keypoint_fk.get_skeleton()
+        joint_names = get_motorica_skeleton_names()
+        for idx, joint in enumerate(joint_names):
+            # ^ In mocaps, Y is the up-right axis
+            parent_x = df[f"{joint}_Xposition"].iloc[frame]
+            parent_y = df[f"{joint}_Zposition"].iloc[frame]
+            parent_z = df[f"{joint}_Yposition"].iloc[frame]
+            # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
+            ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
+
+            children_to_draw = [
+                c for c in skeleton[joint]["children"] if c in joint_names
+            ]
+
+            for c in children_to_draw:
+                # ^ In mocaps, Y is the up-right axis
+                child_x = df[f"{c}_Xposition"].iloc[frame]
+                child_y = df[f"{c}_Zposition"].iloc[frame]
+                child_z = df[f"{c}_Yposition"].iloc[frame]
+                
+                ax.plot(
+                    [parent_x, child_x],
+                    [parent_y, child_y],
+                    [parent_z, child_z],
+                    # "k-",
+                    lw=4,
+                    c="black",
+                )
+
+            ax.text(
+                x=parent_x - 0.01,
+                y=parent_y - 0.01,
+                z=parent_z - 0.01,
+                s=f"{idx}:{joint}",
+                fontsize=5,
+            )
+        
+
+        return ax
+    adjusted_keypoint_loc_df = keypoint_fk.convert_to_dataframe(keypoint_rot_loc.reshape(-1, 19, 3))
+    fig = plt.figure(figsize=(20, 10))
+    input_loc_ax = fig.add_subplot(121, projection="3d")
+    input_loc_ax = visualize_keypoint_data(input_loc_ax, 0, adjusted_keypoint_loc_df)
+    input_loc_ax.set_title("Adjusted Keypoint")
+    smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+    smpl_loc_ax = fig.add_subplot(122, projection="3d")
+    smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, 0, smpl_loc_df)
+    smpl_loc_ax.set_title("SMPL Model")
+    # set xyz axis
+    smpl_loc_ax.set_xlabel("X")
+    smpl_loc_ax.set_ylabel("Y")
+    smpl_loc_ax.set_zlabel("Z")
+    
+    plt.savefig("dataloader_testing_fig.png")
+
+
+
+
+    
     # # processing motorica data
     # keypoint_col_name = selected_col = [
     #         "Hips_Xposition",
@@ -419,7 +491,7 @@ def main():
     # keypoint_pos = keypoint_fk.forward(keypoint_batch)
     # position_df = keypoint_fk.convert_to_dataframe(keypoint_pos)
 
-
+    
 
     # motorica_dummy_data = load_dummy_motorica_data()
     # # motorica_dummy_data.values = keypoint_batch_df
