@@ -106,6 +106,17 @@ class AlignmentDataset(Dataset):
             keypoint_path = self.all_data[idx]
             with open(keypoint_path, "rb") as f:
                 keypoint_data_df = pickle.load(f)
+            keypoint_order = expand_skeleton(get_motorica_skeleton_names(), "ZXY")
+            selected_col = [
+                "Hips_Xposition",
+                "Hips_Yposition",
+                "Hips_Zposition",
+            ] + keypoint_order
+            keypoint_data_df = keypoint_data_df[selected_col]
+            # convert rotation from degree to radian
+            keypoint_data_df[keypoint_order] = keypoint_data_df[
+                keypoint_order
+            ].apply(lambda x: np.deg2rad(x))
             keypoint_data = keypoint_data_df.values
             # padding zero to the longest sequence
             curr_sequence_length = len(keypoint_data)
@@ -361,8 +372,6 @@ class AlignmentDataModule(pl.LightningDataModule):
             return self.predict_dataloader()
         
     
-
-
 def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
     if skeleton is None:
         skeleton = get_keypoint_skeleton()
@@ -414,7 +423,7 @@ def main():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
     
     dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
-    data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="validate")
+    data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="predict")
     alighment_dataset  = data_module.get_dataloader()
     
 
@@ -454,75 +463,75 @@ def main():
 
 
 
-    # frame = 100
+    frame = 30
     
     keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
     keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
     keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
-    # fig = plt.figure(figsize=(20, 10))
-    # input_loc_ax = fig.add_subplot(121, projection="3d")
-    # input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
-    # input_loc_ax.set_title("Adjusted Keypoint")
-    # smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
-    # smpl_loc_ax = fig.add_subplot(122, projection="3d")
-    # smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
-    # smpl_loc_ax.set_title("SMPL Model")
-    # # set xyz axis
-    # smpl_loc_ax.set_xlabel("X")
-    # smpl_loc_ax.set_ylabel("Y")
-    # smpl_loc_ax.set_zlabel("Z")
-    # smpl_loc_ax.set_xlim(-1,1)
-    # smpl_loc_ax.set_ylim(-1,1)
-    # smpl_loc_ax.set_zlim(-1,1)
-    # input_loc_ax.set_xlim(-1,1)
-    # input_loc_ax.set_ylim(-1,1)
-    # input_loc_ax.set_zlim(-1,1)
+    fig = plt.figure(figsize=(20, 10))
+    input_loc_ax = fig.add_subplot(121, projection="3d")
+    input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
+    input_loc_ax.set_title("Adjusted Keypoint")
+    smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+    smpl_loc_ax = fig.add_subplot(122, projection="3d")
+    smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
+    smpl_loc_ax.set_title("SMPL Model")
+    # set xyz axis
+    smpl_loc_ax.set_xlabel("X")
+    smpl_loc_ax.set_ylabel("Y")
+    smpl_loc_ax.set_zlabel("Z")
+    smpl_loc_ax.set_xlim(-1,1)
+    smpl_loc_ax.set_ylim(-1,1)
+    smpl_loc_ax.set_zlim(-1,1)
+    input_loc_ax.set_xlim(-1,1)
+    input_loc_ax.set_ylim(-1,1)
+    input_loc_ax.set_zlim(-1,1)
 
-    # plt.savefig(f"debug.png")
+    plt.savefig(f"debug.png")
 
-    image_folder = 'tmp'
-    os.makedirs(image_folder, exist_ok=True)
-    for frame in tqdm(range(len_of_sequence), desc="Visualizing frames"):
+    # image_folder = 'tmp'
+    # os.makedirs(image_folder, exist_ok=True)
+    # for frame in tqdm(range(len_of_sequence), desc="Visualizing frames"):
         
-        fig = plt.figure(figsize=(20, 10))
-        input_loc_ax = fig.add_subplot(121, projection="3d")
-        input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
-        input_loc_ax.set_title("Adjusted Keypoint")
-        smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
-        smpl_loc_ax = fig.add_subplot(122, projection="3d")
-        smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
-        smpl_loc_ax.set_title("SMPL Model")
-        # set xyz axis
-        smpl_loc_ax.set_xlabel("X")
-        smpl_loc_ax.set_ylabel("Y")
-        smpl_loc_ax.set_zlabel("Z")
-        input_loc_ax.set_xlim(-1,1)
-        input_loc_ax.set_ylim(-1,1)
-        input_loc_ax.set_zlim(-1,1)
-        smpl_loc_ax.set_xlim(-1,1)
-        smpl_loc_ax.set_ylim(-1,1)
-        smpl_loc_ax.set_zlim(-1,1)
-        plt.savefig(f"{image_folder}/frame_{frame:04d}.png")
-        plt.close(fig)
-    # compile the video
-    video_name = "output.mp4"
-    images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
-    frame = cv2.imread(os.path.join(image_folder, images[0]))
-    height, width, layers = frame.shape
+    #     fig = plt.figure(figsize=(20, 10))
+    #     input_loc_ax = fig.add_subplot(121, projection="3d")
+    #     input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
+    #     input_loc_ax.set_title("Adjusted Keypoint")
+    #     smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+    #     smpl_loc_ax = fig.add_subplot(122, projection="3d")
+    #     smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
+    #     smpl_loc_ax.set_title("SMPL Model")
+    #     # set xyz axis
+    #     smpl_loc_ax.set_xlabel("X")
+    #     smpl_loc_ax.set_ylabel("Y")
+    #     smpl_loc_ax.set_zlabel("Z")
+    #     input_loc_ax.set_xlim(-1,1)
+    #     input_loc_ax.set_ylim(-1,1)
+    #     input_loc_ax.set_zlim(-1,1)
+    #     smpl_loc_ax.set_xlim(-1,1)
+    #     smpl_loc_ax.set_ylim(-1,1)
+    #     smpl_loc_ax.set_zlim(-1,1)
+    #     plt.savefig(f"{image_folder}/frame_{frame:04d}.png")
+    #     plt.close(fig)
+    # # compile the video
+    # video_name = "output.mp4"
+    # images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
+    # frame = cv2.imread(os.path.join(image_folder, images[0]))
+    # height, width, layers = frame.shape
 
-    fps = 30  # Set frames per second
-    video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    # fps = 30  # Set frames per second
+    # video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-    for image in images:
-        video.write(cv2.imread(os.path.join(image_folder, image)))
+    # for image in images:
+    #     video.write(cv2.imread(os.path.join(image_folder, image)))
 
-    cv2.destroyAllWindows()
-    video.release()
+    # cv2.destroyAllWindows()
+    # video.release()
     
-    # remove the images and directory
-    for image in images:
-        os.remove(os.path.join(image_folder, image))
-    os.rmdir(image_folder)
+    # # remove the images and directory
+    # for image in images:
+    #     os.remove(os.path.join(image_folder, image))
+    # os.rmdir(image_folder)
 
 
 

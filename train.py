@@ -85,7 +85,7 @@ class KeypointModel(pl.LightningModule):
         pose = smpl_data_dict["smpl_body_pose"]
         transl = smpl_data_dict["smpl_transl"]
         global_orient = smpl_data_dict["smpl_global_orient"]
-
+        batch_size = pose.shape[0]
         # if there is batch, merge the batch dimension with num pose dimmention
         if len(pose.shape) == 3:
             pose = pose.reshape(-1, pose.shape[-1])
@@ -111,15 +111,11 @@ class KeypointModel(pl.LightningModule):
             smpl_verts = smpl_output.vertices.detach().cpu().numpy()
             smpl_joints_loc = smpl_joints_loc.detach().cpu().numpy()
             return smpl_joints_loc, smpl_verts
-        # only select the joint we needed
         smpl_joint_names = get_SMPL_skeleton_names()
-        # smpl_df = pd.DataFrame(smpl_joints_loc.reshap(smpl_joints_loc.shape[0], -1), columns=expand_skeleton(smpl_joint_names))
-        # print(f'smpl_df')
-        # convert from keypoint to smpl joint
-        # if smpl_joint_name is in selected_joints, then keep the joint
         smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
         # swap from XYZ to ZXY
         smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
+        smpl_joints_loc = smpl_joints_loc.reshape(batch_size, -1, 19, 3)
         return smpl_joints_loc
 
     def keypoint_to_rot_mat(self, keypoint_data: torch.tensor):
@@ -221,7 +217,7 @@ class KeypointModel(pl.LightningModule):
             keypoint_combined
         )  # size (batch_size, 1+19, 9)
         loss = self.loss(
-            predicted_rot_transl, keypoint_combined, smpl_batch
+            predicted_rot_transl, keypoint_combined, smpl_batch, reg_weight = 1
         )
         self.log('train_loss', loss,on_epoch=True)
 
@@ -235,7 +231,8 @@ class KeypointModel(pl.LightningModule):
         ) #(batch_size, seq_length, 1+19, 9)
 
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
-        smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=True)
+        smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=False)
+        # smpl_joint_loc = smpl_joint_loc.reshape(batch_size, -1, 24, 3)
 
         # all ways predict zeros and identity matrix
         predicted_rot_transl = torch.zeros_like(keypoint_rot_mat)
@@ -243,32 +240,24 @@ class KeypointModel(pl.LightningModule):
         predicted_rot_transl[:, :, 1:, :] = torch.eye(3).view(1, 1, 1, 9).repeat(
             predicted_rot_transl.shape[0],predicted_rot_transl.shape[1], 19, 1
         )
-        # adjusted_keypoint = self.apply_prediction_to_keypoint(
-        #     predicted_rot_transl, keypoint_rot_mat
-        # ) # (batch_size, len_of_sequence, 20, 3)
-        # keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
-        # adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
+        adjusted_keypoint = self.apply_prediction_to_keypoint(
+            predicted_rot_transl, keypoint_rot_mat
+        ) # (batch_size, len_of_sequence, 20, 3)
+        keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
+        adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
+        # for i in range(batch_size):
+        #     self.prediction_visualization(
+        #         input_loc = keypoint_rot_loc[i],
+        #         smpl_loc = smpl_joint_loc[i], 
+        #         predicted_loc=adjusted_keypoint_loc[i], 
+        #         frame_to_visualize=0,
+        #         output_path="validation_output.png")
+        #     exit()
 
         loss = self.loss(
             predicted_rot_transl, keypoint_rot_mat, smpl_batch, reg_weight=0
         )
 
-        # keypoint_rot_euler should have the same value adjusted_keypoint_loc. Check their values
-        # print("keypoint_rot_euler", keypoint_rot_euler[0][0])
-        # print("adjusted_keypoint", adjusted_keypoint[0][0])
-        # assert torch.allclose(keypoint_rot_euler, adjusted_keypoint, atol=1e-6), "SMPL joint location and adjusted keypoint location are not close enough"
-        # self.prediction_visualization(
-        #     smpl_loc = smpl_joint_loc, 
-        #     smpl_vertices = smpl_vertices, 
-        #     keypoint_loc=keypoint_rot_loc, 
-        #     predicted_loc=adjusted_keypoint_loc, 
-        #     output_path="validate_keypoint.png")
-        # adjusted_keypoint_loc = adjusted_keypoint_loc.reshape(batch_size*len_of_sequence,-1)
-        # smpl_joint_loc
-        # print(f'adjusted_keypoint_loc shape: {adjusted_keypoint_loc.shape}')
-        # print(f'smpl_joint_loc shape: {smpl_joint_loc.shape}')
-        # # calculate the MPJP loss on uncalibrated poses
-        # loss = self.mse_loss(adjusted_keypoint_loc, smpl_joint_loc)
         self.log('val_loss', loss, on_epoch=True)
         
         
@@ -306,10 +295,10 @@ class KeypointModel(pl.LightningModule):
         # keypoint_rot_loc = keypoint_rot_loc[~padding_mask]
         for i in range(batch_size):
             self.prediction_visualization(
+                input_loc = keypoint_rot_loc[i],
                 smpl_loc = smpl_joint_loc[i], 
-                smpl_vertices = smpl_vertices[i], 
-                keypoint_loc=keypoint_rot_loc[i], 
                 predicted_loc=adjusted_keypoint_loc[i], 
+                frame_to_visualize=0,
                 output_path=str(prediction_output_dir/file_name[0])+".png")
             exit()
 
@@ -320,6 +309,8 @@ class KeypointModel(pl.LightningModule):
         joint_names = get_motorica_skeleton_names()
         for idx, joint in enumerate(joint_names):
             # ^ In mocaps, Y is the up-right axis
+            # print(df[f"{joint}_Xposition"])
+            # print(f'frame: {frame}, joint: {joint}')
             parent_x = df[f"{joint}_Xposition"].iloc[frame]
             parent_y = df[f"{joint}_Zposition"].iloc[frame]
             parent_z = df[f"{joint}_Yposition"].iloc[frame]
@@ -357,28 +348,28 @@ class KeypointModel(pl.LightningModule):
         return ax
     
     # visualize the prediction
-    def prediction_visualization(self, smpl_loc,smpl_vertices, keypoint_loc, predicted_loc, frame_to_visualize = 0, output_path = "predicted_keypoint.png"):
+    def prediction_visualization(self, input_loc, smpl_loc, predicted_loc, frame_to_visualize = 0, output_path = "predicted_keypoint.png"):
         fig = plt.figure(figsize=(30, 10))
-        # input_data_pos_df = self.keypoint_fk.convert_to_dataframe(keypoint_loc)
+        # smpl_joint_names = get_SMPL_skeleton_names()
+        # smpl_joints_loc = smpl_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+        #     # swap from XYZ to ZXY
+        # smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
+        smpl_joint_loc_df = self.keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_loc.reshape(-1, 19, 3)))
         # # show all df columns
-        # input_loc_ax = fig.add_subplot(132, projection="3d")
-        # input_loc_ax = self.visualize_keypoint_data(input_loc_ax, frame_to_visualize, input_data_pos_df)
-        # motorica_dummy_data = load_dummy_motorica_data()
-        # # motorica_dummy_data.values = keypoint_batch_df
-        # motorica_dummy_data.skeleton = self.keypoint_fk.get_skeleton()
-        
-        # input_loc_ax.set_title("Input Keypoint")
-        # input_loc_ax.set_xlabel('X axis')
-        # input_loc_ax.set_ylabel('Y axis')
-        # input_loc_ax.set_zlabel('Z axis')
-        # input_loc_ax.set_box_aspect([1, 1, 1])
-        # input_loc_ax.set_xlim([-1, 1])
-        # input_loc_ax.set_ylim([-1, 1])
-        # input_loc_ax.set_zlim([-1, 1])
+        input_loc_ax = fig.add_subplot(141, projection="3d")
+        input_loc_ax = self.visualize_keypoint_data(ax=input_loc_ax, frame=frame_to_visualize, df=smpl_joint_loc_df)
+        input_loc_ax.set_title("SMPL Joint Loc")
+        input_loc_ax.set_xlabel('X axis')
+        input_loc_ax.set_ylabel('Y axis')
+        input_loc_ax.set_zlabel('Z axis')
+        input_loc_ax.set_box_aspect([1, 1, 1])
+        input_loc_ax.set_xlim([-1, 1])
+        input_loc_ax.set_ylim([-1, 1])
+        input_loc_ax.set_zlim([-1, 1])
 
         predicted_position = self.keypoint_fk.convert_to_dataframe(predicted_loc)
-        predicted_loc_ax = fig.add_subplot(132, projection="3d")
-        predicted_loc_ax = self.visualize_keypoint_data(predicted_loc_ax, frame_to_visualize, predicted_position)
+        predicted_loc_ax = fig.add_subplot(143, projection="3d")
+        predicted_loc_ax = self.visualize_keypoint_data(ax=predicted_loc_ax, frame=frame_to_visualize, df=predicted_position)
         predicted_loc_ax.set_title("Predicted Keypoint")
         predicted_loc_ax.set_xlabel('X axis')
         predicted_loc_ax.set_ylabel('Y axis')
@@ -387,25 +378,20 @@ class KeypointModel(pl.LightningModule):
         predicted_loc_ax.set_ylim([-1, 1])
         predicted_loc_ax.set_zlim([-1, 1])
 
-        smpl_ax = fig.add_subplot(131, projection="3d")
-        smpl_model = smpl_model = smplx.create(
-        model_path=self.smpl_model_path,
-        model_type="smpl",
-        return_verts=True,
-        batch_size=len(keypoint_loc),
-        )
-        smpl_ax = SMPL_visulize_a_frame(smpl_ax, smpl_loc[frame_to_visualize], smpl_vertices[frame_to_visualize], smpl_model)
-        smpl_ax.set_title("SMPL Model")
-        smpl_ax.set_xlabel('X axis')
-        smpl_ax.set_ylabel('Y axis')
-        smpl_ax.set_zlabel('Z axis')
-        smpl_ax.set_xlim([-1, 1])
-        smpl_ax.set_ylim([-1, 1])
-        smpl_ax.set_zlim([-1, 1])
+        input_loc = self.keypoint_fk.convert_to_dataframe(input_loc)
+        input_ax = fig.add_subplot(142, projection="3d")
+        input_ax = self.visualize_keypoint_data(ax=input_ax, frame=frame_to_visualize, df=input_loc)
+        input_ax.set_title("Input Keypoint")
+        input_ax.set_xlabel('X axis')
+        input_ax.set_ylabel('Y axis')
+        input_ax.set_zlabel('Z axis')
+        input_ax.set_xlim([-1, 1])
+        input_ax.set_ylim([-1, 1])
+        input_ax.set_zlim([-1, 1])
 
         # overlay the predicted keypoint on the smpl model
-        overlayed_ax = fig.add_subplot(133, projection="3d")
-        overlayed_ax = SMPL_visulize_a_frame(overlayed_ax, smpl_loc[frame_to_visualize], smpl_vertices[frame_to_visualize], smpl_model)
+        overlayed_ax = fig.add_subplot(144, projection="3d")
+        overlayed_ax = self.visualize_keypoint_data(ax=overlayed_ax, frame=frame_to_visualize, df=smpl_joint_loc_df)
         overlayed_ax = self.visualize_keypoint_data(overlayed_ax, frame_to_visualize, predicted_position)
         overlayed_ax.set_title("Overlayed Keypoint")
         overlayed_ax.set_xlabel('X axis')
@@ -475,8 +461,8 @@ class KeypointModel(pl.LightningModule):
         ) # (batch_size, len_of_sequence, 20, 3)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
         # apply forward kinematics to the smpl data
-        smpl_loc = self.smpl_forward_kinematics(smpl_batch).reshape(batch_size, -1, 19, 3)
-        
+        smpl_loc = self.smpl_forward_kinematics(smpl_batch)
+
         # calculate the loss
         mpjpe_loss = self.mse_loss(adjusted_keypoint_loc, smpl_loc)
 
@@ -487,49 +473,31 @@ class KeypointModel(pl.LightningModule):
             batch_size, len_of_sequence, 19, 1, 1
         ).to(self.device)
         reg_loss = reg_weight * torch.norm(rot_mat - identity_mat, p="fro", dim=(-2, -1)).mean()
-
-        # for debugging only visualize two skeletons
-        adjusted_keypoint_loc_df = self.keypoint_fk.convert_to_dataframe(adjusted_keypoint_loc.reshape(-1, 19, 3))
-        frame = 20
-        fig = plt.figure(figsize=(20, 10))
-        input_loc_ax = fig.add_subplot(121, projection="3d")
-        input_loc_ax = self.visualize_keypoint_data(input_loc_ax, frame, adjusted_keypoint_loc_df)
-        input_loc_ax.set_title("Adjusted Keypoint")
-        smpl_loc_df = self.keypoint_fk.convert_to_dataframe(smpl_loc.reshape(-1, 19, 3))
-        smpl_loc_ax = fig.add_subplot(122, projection="3d")
-        smpl_loc_ax = self.visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
-        smpl_loc_ax.set_title("SMPL Model")
-        input_loc_ax.set_xlim([-1, 1])
-        input_loc_ax.set_ylim([-1, 1])
-        input_loc_ax.set_zlim([-1, 1])
-        smpl_loc_ax.set_xlim([-1, 1])
-        smpl_loc_ax.set_ylim([-1, 1])
-        smpl_loc_ax.set_zlim([-1, 1])
-        fig.savefig("debug.png")
-        exit()
-        
-
+        self.log("reg_loss", reg_loss, on_epoch=True)
+        self.log("mpjpe_loss", mpjpe_loss, on_epoch=True)
+    
         return mpjpe_loss + reg_loss
 
 
 def main():
+
     # mode = "predict"
-    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/smpl2keypoint-epoch=04-train_loss=0.29.ckpt")
+    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/faikt0mo/smpl2keypoint-epoch=79-train_loss=0.38.ckpt")
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
+    # mode = "validate"
+    # mode = "predict"
     mode = "validate"
-    # mode = "train"
-
-
+    num_epoch_to_train = 300
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 16
+    batch_size = 2
     num_workers = 4
 
     data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_5_with_reg",
+                                name="train_6_with_reg",
                                 mode = "disabled"
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
@@ -541,9 +509,10 @@ def main():
         dirpath=str(saving_dir/exp_id),
         filename='smpl2keypoint-{epoch:02d}-{train_loss:.2f}',
         mode='min',
-        every_n_epochs=5  # Save every 10 epochs
+        every_n_epochs=5,  # Save every 10 epochs
+        save_top_k = -1,
     )
-    trainer = Trainer(max_epochs=1, logger=wandb_logger, callbacks = [checkpoint_callback])
+    trainer = Trainer(max_epochs=num_epoch_to_train, logger=wandb_logger, callbacks = [checkpoint_callback])
     if mode == "train":
         trainer.fit(model, data_module.train_dataloader())
     elif mode == "validate":
