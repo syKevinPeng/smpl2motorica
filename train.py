@@ -16,7 +16,7 @@ from matplotlib import pyplot as plt
 import wandb
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 from smpl2motorica.dataloader import AlignmentDataModule
-from smpl2motorica.utils import conti_angle_rep
+from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
 from smpl2motorica.smpl2keypoint import (
     load_dummy_motorica_data,
     get_SMPL_skeleton_names,
@@ -223,8 +223,7 @@ class KeypointModel(pl.LightningModule):
         loss = self.loss(
             predicted_rot_transl, keypoint_combined, smpl_batch
         )
-        self.log('train_loss', loss)
-        self.log("epoch_train_loss", loss, on_epoch=True)
+        self.log('train_loss', loss,on_epoch=True)
 
     def validation_step(self, batch, batch_idx):
         print("Performing Validation Step")
@@ -270,8 +269,7 @@ class KeypointModel(pl.LightningModule):
         # print(f'smpl_joint_loc shape: {smpl_joint_loc.shape}')
         # # calculate the MPJP loss on uncalibrated poses
         # loss = self.mse_loss(adjusted_keypoint_loc, smpl_joint_loc)
-        self.log('val_loss', loss)
-        self.log("epoch_val_loss", loss, on_epoch=True)
+        self.log('val_loss', loss, on_epoch=True)
         
         
     def predict_step(self, batch, batch_idx):
@@ -318,7 +316,7 @@ class KeypointModel(pl.LightningModule):
 
     def visualize_keypoint_data(self,ax, frame: int, df: pd.DataFrame, skeleton = None):
         if skeleton is None:
-            skeleton = self.keypoint_fk.get_skeleton()
+            skeleton = get_keypoint_skeleton()
         joint_names = get_motorica_skeleton_names()
         for idx, joint in enumerate(joint_names):
             # ^ In mocaps, Y is the up-right axis
@@ -468,7 +466,7 @@ class KeypointModel(pl.LightningModule):
         return predicted_keypoint
 
     def loss(
-        self, predicted_rot_transl, keypoint_batch, smpl_batch, reg_weight=1
+        self, predicted_rot_transl, keypoint_batch, smpl_batch, reg_weight=0.1
     ):
         batch_size = keypoint_batch.shape[0]
         len_of_sequence = keypoint_batch.shape[1]
@@ -483,7 +481,7 @@ class KeypointModel(pl.LightningModule):
         mpjpe_loss = self.mse_loss(adjusted_keypoint_loc, smpl_loc)
 
         # regularization term
-        reg_weight = 1
+        reg_weight = reg_weight
         rot_mat = predicted_rot_transl[:, :, 1:, :].view(batch_size, len_of_sequence, 19, 3, 3)
         identity_mat = torch.eye(3).view(1, 1, 1, 3, 3).repeat(
             batch_size, len_of_sequence, 19, 1, 1
@@ -492,17 +490,25 @@ class KeypointModel(pl.LightningModule):
 
         # for debugging only visualize two skeletons
         adjusted_keypoint_loc_df = self.keypoint_fk.convert_to_dataframe(adjusted_keypoint_loc.reshape(-1, 19, 3))
+        frame = 20
         fig = plt.figure(figsize=(20, 10))
         input_loc_ax = fig.add_subplot(121, projection="3d")
-        input_loc_ax = self.visualize_keypoint_data(input_loc_ax, 0, adjusted_keypoint_loc_df)
+        input_loc_ax = self.visualize_keypoint_data(input_loc_ax, frame, adjusted_keypoint_loc_df)
         input_loc_ax.set_title("Adjusted Keypoint")
         smpl_loc_df = self.keypoint_fk.convert_to_dataframe(smpl_loc.reshape(-1, 19, 3))
         smpl_loc_ax = fig.add_subplot(122, projection="3d")
-        smpl_loc_ax = self.visualize_keypoint_data(smpl_loc_ax, 0, smpl_loc_df)
+        smpl_loc_ax = self.visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
         smpl_loc_ax.set_title("SMPL Model")
-
-        fig.savefig("debugging_fig.png")
+        input_loc_ax.set_xlim([-1, 1])
+        input_loc_ax.set_ylim([-1, 1])
+        input_loc_ax.set_zlim([-1, 1])
+        smpl_loc_ax.set_xlim([-1, 1])
+        smpl_loc_ax.set_ylim([-1, 1])
+        smpl_loc_ax.set_zlim([-1, 1])
+        fig.savefig("debug.png")
         exit()
+        
+
         return mpjpe_loss + reg_loss
 
 
@@ -519,12 +525,11 @@ def main():
     batch_size = 16
     num_workers = 4
 
-
     data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_3_with_reg",
+                                name="train_5_with_reg",
                                 mode = "disabled"
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
@@ -538,7 +543,7 @@ def main():
         mode='min',
         every_n_epochs=5  # Save every 10 epochs
     )
-    trainer = Trainer(max_epochs=300, logger=wandb_logger, callbacks = [checkpoint_callback])
+    trainer = Trainer(max_epochs=1, logger=wandb_logger, callbacks = [checkpoint_callback])
     if mode == "train":
         trainer.fit(model, data_module.train_dataloader())
     elif mode == "validate":

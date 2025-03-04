@@ -1,9 +1,5 @@
-import sys
-
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
-
-from utils.pymo.preprocessing import MocapParameterizer
-
+import sys, os
+import cv2
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 import pickle
 from pathlib import Path
@@ -17,19 +13,17 @@ import matplotlib.pyplot as plt
 from smpl2motorica.utils.pymo.preprocessing import (
     MocapParameterizer
 )
+from smpl2motorica.utils.bvh import BVHParser
 from tqdm import tqdm
 from smpl2keypoint import (
-    motorica_draw_stickfigure3d,
-    SMPL_visulize_a_frame,
-    motorica_forward_kinematics,
     get_SMPL_skeleton_names,
     expand_skeleton,
-    motorica2smpl,
-    load_dummy_motorica_data,
     get_motorica_skeleton_names,
-    motorica_to_smpl_mapping
+    motorica_to_smpl_mapping,
+    skeleton_scaler
 )
 from keypoint_fk import ForwardKinematics
+from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
 
 
 class AlignmentDataset(Dataset):
@@ -231,7 +225,6 @@ class AlignmentDataset(Dataset):
         keypoint_data.columns = ["keypoint_" + name for name in keypoint_data.columns]
         combined_df = pd.concat([keypoint_data, smpl_df], axis=1)
 
-
         return combined_df
 
     def preprocess_data(
@@ -279,7 +272,7 @@ class AlignmentDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         if self.mode == "train":
-            self.train_dataset = AlignmentDataset(self.data_dir)
+            self.train_dataset = AlignmentDataset(self.data_dir,)
         elif self.mode == "validate":
             self.val_dataset = AlignmentDataset(self.data_dir, mode="validate")
         elif self.mode == "predict":
@@ -359,6 +352,58 @@ class AlignmentDataModule(pl.LightningDataModule):
             num_workers=1,
             collate_fn=self.collate_fn,
         )
+    def get_dataloader(self):
+        if self.mode == "train":
+            return self.train_dataloader()
+        elif self.mode == "validate":
+            return self.val_dataloader()
+        elif self.mode == "predict":
+            return self.predict_dataloader()
+        
+    
+
+
+def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
+    if skeleton is None:
+        skeleton = get_keypoint_skeleton()
+    joint_names = get_motorica_skeleton_names()
+    for idx, joint in enumerate(joint_names):
+        # ^ In mocaps, Y is the up-right axis
+        parent_x = df[f"{joint}_Xposition"].iloc[frame]
+        parent_y = df[f"{joint}_Zposition"].iloc[frame]
+        parent_z = df[f"{joint}_Yposition"].iloc[frame]
+        # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
+        ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
+
+        children_to_draw = [
+            c for c in skeleton[joint]["children"] if c in joint_names
+        ]
+
+        for c in children_to_draw:
+            # ^ In mocaps, Y is the up-right axis
+            child_x = df[f"{c}_Xposition"].iloc[frame]
+            child_y = df[f"{c}_Zposition"].iloc[frame]
+            child_z = df[f"{c}_Yposition"].iloc[frame]
+            
+            ax.plot(
+                [parent_x, child_x],
+                [parent_y, child_y],
+                [parent_z, child_z],
+                # "k-",
+                lw=4,
+                c="black",
+            )
+
+        ax.text(
+            x=parent_x - 0.01,
+            y=parent_y - 0.01,
+            z=parent_z - 0.01,
+            s=f"{idx}:{joint}",
+            fontsize=5,
+        )
+    
+
+    return ax
 
 def main():
     data_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset")
@@ -367,26 +412,21 @@ def main():
         raise FileNotFoundError(f"Data directory {data_dir} not found")
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
-
-    data_module = AlignmentDataModule(data_dir, batch_size=1, num_workers=1, mode="predict")
-    alighment_dataset  = data_module.predict_dataloader()
-
-    # save all the data in a pickle file
-    # for i in range(len(alignment_data)):
-    #     keypoint_batch, keypoint_col_name, smpl_batch = alignment_data[i]
+    
+    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
+    data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="validate")
+    alighment_dataset  = data_module.get_dataloader()
+    
 
     # # For visualization and testing
-    for keypoint_data, smpl_batch in alighment_dataset:
-        break
+    i_th_data = 0
+    for i, (keypoint_data, smpl_batch) in enumerate(alighment_dataset):
+        if i == i_th_data:
+            break
 
 
     keypoint_fk = ForwardKinematics()
-
     batch_size, len_of_sequence, _ = smpl_batch["smpl_body_pose"].shape
-    # # convert from matrix to euler angles
-    # # keypoint_batch = conti_angle_rep.matrix_to_euler_angles(keypoint_batch, convention="XYZ")
-    # # reshape back to (num_frames, num_keypoints x 3)
-    # keypoint_batch = keypoint_batch.reshape(keypoint_batch.shape[0], -1)
 
     # # processing SMPL data
     pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
@@ -412,106 +452,79 @@ def main():
         # swap from XYZ to ZXY
     smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
 
-    batch_size, len_of_sequence, num_joints = keypoint_data.shape[:3]
-    keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, 3)
-    keypoint_position = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
-    keypoint_position = keypoint_position.reshape(batch_size, len_of_sequence, -1, 3)
-    keypoint_rot_loc = keypoint_position.view(batch_size, -1, 19, 3)
 
-    def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
-        if skeleton is None:
-            skeleton = keypoint_fk.get_skeleton()
-        joint_names = get_motorica_skeleton_names()
-        for idx, joint in enumerate(joint_names):
-            # ^ In mocaps, Y is the up-right axis
-            parent_x = df[f"{joint}_Xposition"].iloc[frame]
-            parent_y = df[f"{joint}_Zposition"].iloc[frame]
-            parent_z = df[f"{joint}_Yposition"].iloc[frame]
-            # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
-            ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
 
-            children_to_draw = [
-                c for c in skeleton[joint]["children"] if c in joint_names
-            ]
+    # frame = 100
+    
+    keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+    keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
+    keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
+    # fig = plt.figure(figsize=(20, 10))
+    # input_loc_ax = fig.add_subplot(121, projection="3d")
+    # input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
+    # input_loc_ax.set_title("Adjusted Keypoint")
+    # smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+    # smpl_loc_ax = fig.add_subplot(122, projection="3d")
+    # smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
+    # smpl_loc_ax.set_title("SMPL Model")
+    # # set xyz axis
+    # smpl_loc_ax.set_xlabel("X")
+    # smpl_loc_ax.set_ylabel("Y")
+    # smpl_loc_ax.set_zlabel("Z")
+    # smpl_loc_ax.set_xlim(-1,1)
+    # smpl_loc_ax.set_ylim(-1,1)
+    # smpl_loc_ax.set_zlim(-1,1)
+    # input_loc_ax.set_xlim(-1,1)
+    # input_loc_ax.set_ylim(-1,1)
+    # input_loc_ax.set_zlim(-1,1)
 
-            for c in children_to_draw:
-                # ^ In mocaps, Y is the up-right axis
-                child_x = df[f"{c}_Xposition"].iloc[frame]
-                child_y = df[f"{c}_Zposition"].iloc[frame]
-                child_z = df[f"{c}_Yposition"].iloc[frame]
-                
-                ax.plot(
-                    [parent_x, child_x],
-                    [parent_y, child_y],
-                    [parent_z, child_z],
-                    # "k-",
-                    lw=4,
-                    c="black",
-                )
+    # plt.savefig(f"debug.png")
 
-            ax.text(
-                x=parent_x - 0.01,
-                y=parent_y - 0.01,
-                z=parent_z - 0.01,
-                s=f"{idx}:{joint}",
-                fontsize=5,
-            )
+    image_folder = 'tmp'
+    os.makedirs(image_folder, exist_ok=True)
+    for frame in tqdm(range(len_of_sequence), desc="Visualizing frames"):
         
+        fig = plt.figure(figsize=(20, 10))
+        input_loc_ax = fig.add_subplot(121, projection="3d")
+        input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
+        input_loc_ax.set_title("Adjusted Keypoint")
+        smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+        smpl_loc_ax = fig.add_subplot(122, projection="3d")
+        smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
+        smpl_loc_ax.set_title("SMPL Model")
+        # set xyz axis
+        smpl_loc_ax.set_xlabel("X")
+        smpl_loc_ax.set_ylabel("Y")
+        smpl_loc_ax.set_zlabel("Z")
+        input_loc_ax.set_xlim(-1,1)
+        input_loc_ax.set_ylim(-1,1)
+        input_loc_ax.set_zlim(-1,1)
+        smpl_loc_ax.set_xlim(-1,1)
+        smpl_loc_ax.set_ylim(-1,1)
+        smpl_loc_ax.set_zlim(-1,1)
+        plt.savefig(f"{image_folder}/frame_{frame:04d}.png")
+        plt.close(fig)
+    # compile the video
+    video_name = "output.mp4"
+    images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
+    frame = cv2.imread(os.path.join(image_folder, images[0]))
+    height, width, layers = frame.shape
 
-        return ax
-    adjusted_keypoint_loc_df = keypoint_fk.convert_to_dataframe(keypoint_rot_loc.reshape(-1, 19, 3))
-    fig = plt.figure(figsize=(20, 10))
-    input_loc_ax = fig.add_subplot(121, projection="3d")
-    input_loc_ax = visualize_keypoint_data(input_loc_ax, 0, adjusted_keypoint_loc_df)
-    input_loc_ax.set_title("Adjusted Keypoint")
-    smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
-    smpl_loc_ax = fig.add_subplot(122, projection="3d")
-    smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, 0, smpl_loc_df)
-    smpl_loc_ax.set_title("SMPL Model")
-    # set xyz axis
-    smpl_loc_ax.set_xlabel("X")
-    smpl_loc_ax.set_ylabel("Y")
-    smpl_loc_ax.set_zlabel("Z")
+    fps = 30  # Set frames per second
+    video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+
+    for image in images:
+        video.write(cv2.imread(os.path.join(image_folder, image)))
+
+    cv2.destroyAllWindows()
+    video.release()
     
-    plt.savefig("dataloader_testing_fig.png")
+    # remove the images and directory
+    for image in images:
+        os.remove(os.path.join(image_folder, image))
+    os.rmdir(image_folder)
 
 
-
-
-    
-    # # processing motorica data
-    # keypoint_col_name = selected_col = [
-    #         "Hips_Xposition",
-    #         "Hips_Yposition",
-    #         "Hips_Zposition",
-    #     ]  + expand_skeleton(get_motorica_skeleton_names(), "ZXY")
-    # # remove "smpl_" prefix
-    # keypoint_col_name = [col.replace("keypoint_", "") for col in keypoint_col_name]
-    # keypoint_fk = ForwardKinematics()
-    # keypoint_pos = keypoint_fk.forward(keypoint_batch)
-    # position_df = keypoint_fk.convert_to_dataframe(keypoint_pos)
-
-    
-
-    # motorica_dummy_data = load_dummy_motorica_data()
-    # # motorica_dummy_data.values = keypoint_batch_df
-    # motorica_dummy_data.skeleton = get_skeleton()
-    # # frame to visualize
-    # frame = 0
-    # fig = plt.figure(figsize=(15, 10))
-    # smpl_ax = fig.add_subplot(121, projection="3d")
-    # smpl_ax = SMPL_visulize_a_frame(
-    #     smpl_ax, smpl_joints_loc[frame], smpl_vertices[frame], smpl_model
-    # )
-    # smpl_ax.set_title("SMPL joints")
-
-    # ax_motorica = fig.add_subplot(122, projection="3d")
-    # ax_motorica = motorica_draw_stickfigure3d(
-    #     ax_motorica, motorica_dummy_data, frame, data=position_df
-    # )
-    # ax_motorica.set_title("Motorica")
-
-    # plt.savefig("dataloader_testing_fig.png")
 
 
 if __name__ == "__main__":

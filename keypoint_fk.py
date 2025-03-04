@@ -1,3 +1,4 @@
+from matplotlib.pylab import f
 import torch
 import numpy as np
 import pandas as pd
@@ -32,7 +33,6 @@ class ForwardKinematics:
             self.rotation_orders,
             self.has_position,
         ) = self._parse_skeleton(self.skeleton)
-        self.motorica_joint_in_smpl_order = list(motorica2smpl())
 
     def get_joint_order(self):
         return self.joint_names
@@ -182,6 +182,7 @@ class ForwardKinematics:
         # input shape: (batch_size x num_frames, num_joints x 3)
         if data.dim() !=2 or data.shape[1] != 60:
             raise ValueError("Expect input data to have shape (batch_size x num_frames, num_joints x 3)")
+        print(f'fk: data shape: {data.shape}')
         pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
         rot = data[:, 3:]
         num_frames = pos.shape[0]
@@ -207,13 +208,13 @@ class ForwardKinematics:
                 parent = self.parents[j]
                 # compute rotations
                 parent_rot = global_rot_list[parent]
-                global_rot = torch.bmm(parent_rot, rot_values[:, j,:,:]) # HERE!
+                global_rot = torch.bmm(parent_rot, rot_values[:, j,:,:]) 
                 global_rot_list.append(global_rot)
 
                 # compuate positions
                 batch_size = pos.shape[0]
-                # pos shape:(num_frame, 3), offset shape:(3,)
-                local_pose = pos + self.offsets[j].expand(batch_size, -1)
+                #pos shape:(num_frame, 3), offset shape:(3,)
+                local_pose = self.offsets[j].expand(batch_size, -1)
                 #parent_rot: torch.Size([num_frame, 3, 3]); local_pose: torch.Size([num_frame, 3])
                 rotated_offset = torch.bmm(global_rot_list[parent],local_pose.unsqueeze(-1)).squeeze(-1)
                 global_pos = global_pos_list[parent] + rotated_offset
@@ -249,24 +250,72 @@ class ForwardKinematics:
         test = gradcheck(forward_wrapper, (dummy_input,), eps=1e-6, atol=1e-4)
         
     
+def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
+    if skeleton is None:
+        skeleton = get_keypoint_skeleton()
+    joint_names = get_motorica_skeleton_names()
+    for idx, joint in enumerate(joint_names):
+        # ^ In mocaps, Y is the up-right axis
+        parent_x = df[f"{joint}_Xposition"].iloc[frame]
+        parent_y = df[f"{joint}_Zposition"].iloc[frame]
+        parent_z = df[f"{joint}_Yposition"].iloc[frame]
+        # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
+        ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
 
+        children_to_draw = [
+            c for c in skeleton[joint]["children"] if c in joint_names
+        ]
+
+        for c in children_to_draw:
+            # ^ In mocaps, Y is the up-right axis
+            child_x = df[f"{c}_Xposition"].iloc[frame]
+            child_y = df[f"{c}_Zposition"].iloc[frame]
+            child_z = df[f"{c}_Yposition"].iloc[frame]
+            
+            ax.plot(
+                [parent_x, child_x],
+                [parent_y, child_y],
+                [parent_z, child_z],
+                # "k-",
+                lw=4,
+                c="black",
+            )
+
+        ax.text(
+            x=parent_x - 0.01,
+            y=parent_y - 0.01,
+            z=parent_z - 0.01,
+            s=f"{idx}:{joint}",
+            fontsize=5,
+        )
+    
+
+    return ax
 if __name__ == "__main__":
-
+    from smpl2motorica.dataloader import AlignmentDataset
+    data_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset")
+    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
+    for (keypoint_data, smpl_dict) in dataset:
+        break
 
     # forward kinematics
     fk = ForwardKinematics()
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     # fk.grad_check()
-
+    reshaped_keypoint_data = keypoint_data.reshape(-1, 60)
+    keypoint_order = expand_skeleton(get_motorica_skeleton_names(), "ZXY")
+    selected_col = [
+        "Hips_Xposition",
+        "Hips_Yposition",
+        "Hips_Zposition",
+    ] + keypoint_order
+    keypoint_data_df = pd.DataFrame(reshaped_keypoint_data, columns=selected_col)
+    keypoint_data_df[keypoint_order] = keypoint_data_df[keypoint_order].apply(np.rad2deg)
     mocap_track = load_dummy_motorica_data()
     mocap_track.skeleton = get_keypoint_skeleton()
-    mocap_df = mocap_track.values
-
-    # force the starting position to be zero all the time
-    mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]] = 0
-    mocap_track.values = mocap_df
+    mocap_track.values = keypoint_data_df
     position_mocap = MocapParameterizer("position").fit_transform([mocap_track])[0]
-    frame = 150
+    frame = 30
     fig = plt.figure(figsize=(10, 20))
     ax = fig.add_subplot(121, projection='3d')
     motorica_ax = motorica_draw_stickfigure3d(
@@ -282,24 +331,18 @@ if __name__ == "__main__":
     motorica_ax.set_xlim([-1, 1])
     motorica_ax.set_ylim([-1, 1])
     motorica_ax.set_title('original Figure')
-    input_data_order = ["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] + expand_skeleton(list(motorica2smpl()))
-    selected_df = mocap_df[input_data_order]
-    # hiarchy order:
-    hiarchy_order =["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"] +  expand_skeleton(fk.get_joint_order(), "ZXY")
-    # reorder from input_data_order to hiarchy_order
-    selected_df = selected_df[hiarchy_order]
 
-    selected_tensor = torch.tensor(selected_df.values, dtype=torch.float32, requires_grad=True)
-    position_tensor, tensor_name = fk.forward(selected_tensor)
+    # selected_df = mocap_df[expand_skeleton(fk.get_joint_order(), "ZXY")].apply(np.deg2rad)
+    # selected_df = pd.concat([mocap_df[["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"]], selected_df], axis=1)
+    # motion_data = torch.tensor(selected_df.values, dtype=torch.float32)
+    # ZXY to XYZ
+    # swaped_keypoint_data = keypoint_data[:,:, [1,2, 0]]
+    input_data = torch.tensor(keypoint_data, dtype=torch.float32).reshape(-1, 60)
+    position_tensor = fk.forward(input_data)
     position_df = fk.convert_to_dataframe(position_tensor)
     # check if the output is the same
     ax = fig.add_subplot(122, projection='3d')
-    keypoint_fk = motorica_draw_stickfigure3d(
-                ax,
-                mocap_track=mocap_track,
-                frame=frame, draw_names=False,
-                data= position_df
-            )
+    keypoint_fk = visualize_keypoint_data(ax, frame, position_df)
     keypoint_fk.set_xlabel('X axis')
     keypoint_fk.set_ylabel('Y axis')
     keypoint_fk.set_zlabel('Z axis')

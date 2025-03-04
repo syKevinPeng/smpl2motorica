@@ -48,32 +48,6 @@ def get_SMPL_skeleton_names():
         "left_hand",
         "right_hand",
     ]
-
-
-# def get_motorica_skeleton_names():
-#     return [
-#         "Head",
-#         "Hips",
-#         "LeftArm",
-#         "LeftFoot",
-#         "LeftForeArm",
-#         "LeftHand",
-#         "LeftLeg",
-#         "LeftShoulder",
-#         # "LeftToeBase",
-#         "LeftUpLeg",
-#         "Neck",
-#         "RightArm",
-#         "RightFoot",
-#         "RightForeArm",
-#         "RightHand",
-#         "RightLeg",
-#         "RightShoulder",
-#         # "RightToeBase",
-#         "RightUpLeg",
-#         "Spine",
-#         "Spine1",
-#     ]
 def get_motorica_skeleton_names():
     return [
         'Hips', 
@@ -665,7 +639,6 @@ if __name__ == "__main__":
 
         # TODO visualize a frame
         if debug:
-
             position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_smpl_df)
 
             vis_frame = 0
@@ -741,4 +714,3 @@ if __name__ == "__main__":
             smpl_loc_ax.view_init(elev=0, azim=90)
             # fig.savefig(f"smpl_frame_{vis_frame:04d}.png")
             save_video(position_df, smpl_loc_df, output_file_name=f"{data_file.stem}_motorica.mp4")
-            exit()
