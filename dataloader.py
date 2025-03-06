@@ -41,6 +41,8 @@ class AlignmentDataset(Dataset):
         if self.processed_file_save_path.exists() and not force_reprocess:
             print("Loading preprocessed data from pickle")
             self.all_data = pd.read_pickle(self.processed_file_save_path)
+            print(f'Debugging Only. Loadding 30% of the data')
+            self.all_data = self.all_data.iloc[:int(len(self.all_data) * 0.3)]
         else:
             print("No preprocessed data found or force reprocess is set to True")
             print("Preprocessing data")
@@ -422,72 +424,72 @@ def main():
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
     
-    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
-    data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="predict")
-    alighment_dataset  = data_module.get_dataloader()
+    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=True)
+    # data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="predict")
+    # alighment_dataset  = data_module.get_dataloader()
     
 
-    # # For visualization and testing
-    i_th_data = 0
-    for i, (keypoint_data, smpl_batch) in enumerate(alighment_dataset):
-        if i == i_th_data:
-            break
+    # # # For visualization and testing
+    # i_th_data = 0
+    # for i, (keypoint_data, smpl_batch) in enumerate(alighment_dataset):
+    #     if i == i_th_data:
+    #         break
 
 
-    keypoint_fk = ForwardKinematics()
-    batch_size, len_of_sequence, _ = smpl_batch["smpl_body_pose"].shape
+    # keypoint_fk = ForwardKinematics()
+    # batch_size, len_of_sequence, _ = smpl_batch["smpl_body_pose"].shape
 
-    # # processing SMPL data
-    pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
-    transl = smpl_batch["smpl_transl"].reshape(-1, 3)
-    global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
+    # # # processing SMPL data
+    # pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
+    # transl = smpl_batch["smpl_transl"].reshape(-1, 3)
+    # global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
 
-    smpl_model = smplx.create(
-        model_path=smpl_model_path,
-        model_type="smpl",
-        return_verts=True,
-        batch_size=len(pose),
-    )
-    smpl_output = smpl_model(
-        global_orient=torch.tensor(global_orient, dtype=torch.float32),
-        body_pose=torch.tensor(pose, dtype=torch.float32),
-        transl=torch.tensor(transl, dtype=torch.float32),
-    )
-    smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
-    smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
-    smpl_joints_loc = smpl_joints_loc[:, :24, :]
-    smpl_joint_names = get_SMPL_skeleton_names()
-    smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
-        # swap from XYZ to ZXY
-    smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
+    # smpl_model = smplx.create(
+    #     model_path=smpl_model_path,
+    #     model_type="smpl",
+    #     return_verts=True,
+    #     batch_size=len(pose),
+    # )
+    # smpl_output = smpl_model(
+    #     global_orient=torch.tensor(global_orient, dtype=torch.float32),
+    #     body_pose=torch.tensor(pose, dtype=torch.float32),
+    #     transl=torch.tensor(transl, dtype=torch.float32),
+    # )
+    # smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
+    # smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
+    # smpl_joints_loc = smpl_joints_loc[:, :24, :]
+    # smpl_joint_names = get_SMPL_skeleton_names()
+    # smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+    #     # swap from XYZ to ZXY
+    # smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
 
 
 
-    frame = 30
+    # frame = 30
     
-    keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
-    keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
-    keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
-    fig = plt.figure(figsize=(20, 10))
-    input_loc_ax = fig.add_subplot(121, projection="3d")
-    input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
-    input_loc_ax.set_title("Adjusted Keypoint")
-    smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
-    smpl_loc_ax = fig.add_subplot(122, projection="3d")
-    smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
-    smpl_loc_ax.set_title("SMPL Model")
-    # set xyz axis
-    smpl_loc_ax.set_xlabel("X")
-    smpl_loc_ax.set_ylabel("Y")
-    smpl_loc_ax.set_zlabel("Z")
-    smpl_loc_ax.set_xlim(-1,1)
-    smpl_loc_ax.set_ylim(-1,1)
-    smpl_loc_ax.set_zlim(-1,1)
-    input_loc_ax.set_xlim(-1,1)
-    input_loc_ax.set_ylim(-1,1)
-    input_loc_ax.set_zlim(-1,1)
+    # keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+    # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
+    # keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
+    # fig = plt.figure(figsize=(20, 10))
+    # input_loc_ax = fig.add_subplot(121, projection="3d")
+    # input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
+    # input_loc_ax.set_title("Adjusted Keypoint")
+    # smpl_loc_df = keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
+    # smpl_loc_ax = fig.add_subplot(122, projection="3d")
+    # smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, frame, smpl_loc_df)
+    # smpl_loc_ax.set_title("SMPL Model")
+    # # set xyz axis
+    # smpl_loc_ax.set_xlabel("X")
+    # smpl_loc_ax.set_ylabel("Y")
+    # smpl_loc_ax.set_zlabel("Z")
+    # smpl_loc_ax.set_xlim(-1,1)
+    # smpl_loc_ax.set_ylim(-1,1)
+    # smpl_loc_ax.set_zlim(-1,1)
+    # input_loc_ax.set_xlim(-1,1)
+    # input_loc_ax.set_ylim(-1,1)
+    # input_loc_ax.set_zlim(-1,1)
 
-    plt.savefig(f"debug.png")
+    # plt.savefig(f"debug.png")
 
     # image_folder = 'tmp'
     # os.makedirs(image_folder, exist_ok=True)

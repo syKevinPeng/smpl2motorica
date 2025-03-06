@@ -27,6 +27,7 @@ from smpl2motorica.smpl2keypoint import (
     SMPL_visulize_a_frame,
     motorica_draw_stickfigure3d
 )
+from smpl2motorica.utils.conti_angle_rep import rotation_6d_to_matrix, matrix_to_rotation_6d
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.utils.pymo.Quaternions import Quaternions
 from smpl2motorica.keypoint_fk import ForwardKinematics
@@ -35,17 +36,25 @@ class RotationTranslationNet(nn.Module):
     def __init__(self):
         super(RotationTranslationNet, self).__init__()
         self.fc = nn.Sequential(
-            nn.Linear(9, 256),
+            nn.Linear(9, 16),
             nn.ReLU(),
-            nn.Linear(256, 512),
+            nn.Linear(16, 32),
             nn.ReLU(),
             nn.Linear(
-                512, 9
-            ),  # output size is (batch_size, (1+19)x9), 1 for translation and 19 for rotation
+                32, 6
+            ),  # output size is (batch_size, (1+19),6), 1 for translation and 19 for rotation in 6D representation
         )
 
     def forward(self, x):
+        batch_size,num_joints = x.shape[:2]
         x = self.fc(x)
+        # convert from 6D representation to rotation matrix
+        x_trans = x[:, 0, :]
+        x_rot = x[:, 1:, :]
+        x_rot = rotation_6d_to_matrix(x_rot)
+        x = torch.cat([x_trans.unsqueeze(1), x_rot], dim=1)
+        # flatten the 3x3 matrix to 9
+        x = x.view(batch_size, num_joints, 9)
         return x
 
 
@@ -217,7 +226,7 @@ class KeypointModel(pl.LightningModule):
             keypoint_combined
         )  # size (batch_size, 1+19, 9)
         loss = self.loss(
-            predicted_rot_transl, keypoint_combined, smpl_batch, reg_weight = 1
+            predicted_rot_transl, keypoint_combined, smpl_batch, reg_weight = 0.1
         )
         self.log('train_loss', loss,on_epoch=True)
 
@@ -481,24 +490,23 @@ class KeypointModel(pl.LightningModule):
 
 def main():
 
-    # mode = "predict"
     ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/faikt0mo/smpl2keypoint-epoch=79-train_loss=0.38.ckpt")
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
     # mode = "validate"
     # mode = "predict"
-    mode = "validate"
+    mode = "train"
     num_epoch_to_train = 300
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 2
+    batch_size = 16
     num_workers = 4
 
     data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_6_with_reg",
-                                mode = "disabled"
+                                name="train_9_with_reg",
+                                # mode = "disabled"
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
     exp_id = wandb_logger.experiment.id
@@ -509,7 +517,7 @@ def main():
         dirpath=str(saving_dir/exp_id),
         filename='smpl2keypoint-{epoch:02d}-{train_loss:.2f}',
         mode='min',
-        every_n_epochs=5,  # Save every 10 epochs
+        every_n_epochs=30,  
         save_top_k = -1,
     )
     trainer = Trainer(max_epochs=num_epoch_to_train, logger=wandb_logger, callbacks = [checkpoint_callback])
