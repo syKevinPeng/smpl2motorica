@@ -41,8 +41,8 @@ class AlignmentDataset(Dataset):
         if self.processed_file_save_path.exists() and not force_reprocess:
             print("Loading preprocessed data from pickle")
             self.all_data = pd.read_pickle(self.processed_file_save_path)
-            print(f'Debugging Only. Loadding 30% of the data')
-            self.all_data = self.all_data.iloc[:int(len(self.all_data) * 0.3)]
+            # print(f'Debugging Only. Loadding 10% of the data')
+            # self.all_data = self.all_data.iloc[:int(len(self.all_data) * 0.1)]
         else:
             print("No preprocessed data found or force reprocess is set to True")
             print("Preprocessing data")
@@ -56,7 +56,10 @@ class AlignmentDataset(Dataset):
             self.get_longest_sequence_length()
 
     def __len__(self):
-        return len(self.all_data) // self.segment_length
+        if self.mode == "predict":
+            return len(self.keypoint_files)
+        else:
+            return len(self.all_data) // self.segment_length
 
     def __getitem__(self, idx):
         if self.mode == "train" or self.mode == "validate":
@@ -122,10 +125,11 @@ class AlignmentDataset(Dataset):
             keypoint_data = keypoint_data_df.values
             # padding zero to the longest sequence
             curr_sequence_length = len(keypoint_data)
-            keypoint_data_padded = np.concatenate(
-                [keypoint_data, np.zeros((self.longest_length - curr_sequence_length, keypoint_data.shape[1]))], axis=0
-            )
-            keypoint_data_padded = keypoint_data_padded.reshape(self.longest_length, -1, 3)
+            # keypoint_data_padded = np.concatenate(
+            #     [keypoint_data, np.zeros((self.longest_length - curr_sequence_length, keypoint_data.shape[1]))], axis=0
+            # )
+            # keypoint_data_padded = keypoint_data_padded.reshape(self.longest_length, -1, 3)
+            keypoint_data_padded = keypoint_data.reshape(curr_sequence_length, -1, 3)
             padding_mask = np.zeros((self.longest_length))
             padding_mask[:curr_sequence_length] = 1
 
@@ -424,9 +428,13 @@ def main():
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
     
-    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=True)
-    # data_module = AlignmentDataModule(data_dir, batch_size=2, num_workers=1, mode="predict")
-    # alighment_dataset  = data_module.get_dataloader()
+    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
+    data_module = AlignmentDataModule(data_dir, batch_size=1, num_workers=1, mode="predict")
+    alighment_dataset  = data_module.get_dataloader()
+    print(f'len of alignment dataset: {len(alighment_dataset)}')
+    for keypoint, smpl in alighment_dataset:
+        print(f'keypoint shape: {keypoint.shape}')
+        break
     
 
     # # # For visualization and testing

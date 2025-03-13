@@ -1,4 +1,6 @@
+from math import isnan
 import matplotlib
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import pytorch3d.transforms
 import torch
 from lightning.pytorch.loggers import WandbLogger
@@ -6,13 +8,18 @@ from lightning.pytorch import Trainer
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader
 import torch.nn as nn
-import sys
+import sys, os
+from tqdm import tqdm
 import pandas as pd
 import smplx
 from pathlib import Path
 import pytorch3d
 import numpy as np
 from matplotlib import pyplot as plt
+from lightning.pytorch.utilities import grad_norm
+import cv2
+from concurrent.futures import ThreadPoolExecutor
+
 import wandb
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 from smpl2motorica.dataloader import AlignmentDataModule
@@ -31,30 +38,107 @@ from smpl2motorica.utils.conti_angle_rep import rotation_6d_to_matrix, matrix_to
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.utils.pymo.Quaternions import Quaternions
 from smpl2motorica.keypoint_fk import ForwardKinematics
+from datetime import datetime
+
+def grad_hook(module, grad_input, grad_output):
+    # Check grad_input (gradients flowing INTO the module)
+    for i, g in enumerate(grad_input):
+        if g is not None:
+            if torch.isnan(g).any():
+                print(f"!!!grad_hook: NaN in grad_input[{i}] of {module.__class__.__name__} !!!")
+
+    
+    # Check grad_output (gradients flowing OUT of the module)
+    for i, g in enumerate(grad_output):
+        if g is not None:
+            if torch.isnan(g).any():
+                print(f"!!!grad_hook: NaN in grad_output[{i}] of {module.__class__.__name__} !!!")
+
+def _grad_hook(grad, name):
+    if torch.isnan(grad).any():
+        print(f"!!! _grad_hook: NaN in {name} gradient !!!")
+        exit()
+    return grad
+
+
+class EulerAnglesToMatrix(nn.Module):
+    def __init__(self):
+        super(EulerAnglesToMatrix, self).__init__()
+        self.convention = pytorch3d.transforms.euler_angles_to_matrix
+
+    def forward(self, x):
+        # x is in the shape of (batch_size, seq_len, num_joints-1, 3)
+        # convert to rotation matrix
+        x = self.convention(x, convention="ZXY")
+        return x
 
 class RotationTranslationNet(nn.Module):
     def __init__(self):
         super(RotationTranslationNet, self).__init__()
-        self.fc = nn.Sequential(
+        self.layers = nn.Sequential(
             nn.Linear(9, 16),
-            nn.ReLU(),
+            nn.LayerNorm(16),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Linear(16, 32),
-            nn.ReLU(),
+            nn.LayerNorm(32),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Linear(
                 32, 6
             ),  # output size is (batch_size, (1+19),6), 1 for translation and 19 for rotation in 6D representation
         )
 
+        # Initialize the weights of the last layer to be close to zero
+        nn.init.normal_(self.layers[-1].weight, mean=0.0, std=1e-4)
+        nn.init.constant_(self.layers[-1].bias, 1e-4)
+        for layer in self.layers:
+            layer.register_full_backward_hook(grad_hook)
+        
+
     def forward(self, x):
-        batch_size,num_joints = x.shape[:2]
-        x = self.fc(x)
-        # convert from 6D representation to rotation matrix
-        x_trans = x[:, 0, :]
-        x_rot = x[:, 1:, :]
+        batch_size,seq_len, num_joints,_ = x.shape
+        x = self.layers(x)
+        x_trans = x[:,:, 0, :]
+        x_rot = x[:, :,1:, :]
+        if torch.isnan(x_rot).any():
+            print("!!! x_rot 6d is nan !!!")
         x_rot = rotation_6d_to_matrix(x_rot)
-        x = torch.cat([x_trans.unsqueeze(1), x_rot], dim=1)
-        # flatten the 3x3 matrix to 9
-        x = x.view(batch_size, num_joints, 9)
+        if torch.isnan(x_rot).any():
+            print("!!! x_rot matrix is nan !!!")
+        x_rot = x_rot.view(batch_size, seq_len, num_joints-1, 9)
+        trans_zero_padding = torch.zeros(batch_size, seq_len,1, 3).to(x.device)
+        x_trans = torch.cat([x_trans.unsqueeze(2), trans_zero_padding], dim=-1)
+        x = torch.cat([x_trans, x_rot], dim=2)
+        return x
+
+class LocDiffNet(nn.Module):
+    def __init__(self, num_joints = 19):
+        super(LocDiffNet, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(num_joints* 3, 64),
+            nn.GELU(),
+            nn.Linear(64, 128),
+            nn.GELU(),
+            nn.Linear(128,(num_joints+1)*6),
+        )
+        # Initialize the weights of the last layer to be close to zero
+        nn.init.normal_(self.fc[-1].weight, mean=0.0, std=1e-4)
+        nn.init.constant_(self.fc[-1].bias, 1e-4)
+
+
+    def forward(self, x):
+        batch_size,seq_len, num_joints,_ = x.shape
+        x = x.reshape(batch_size, seq_len, -1)
+        x = self.fc(x)
+        x = x.reshape(batch_size, seq_len, num_joints+1, 6)
+        # convert from 6D representation to rotation matrix
+        x_trans = x[:, :,0, :] # shape: (batch_size, seq_len, joints, 6)
+        x_rot = x[:, :, 1:, :] # shape: (batch_size, seq_len, 6)
+        x_rot = rotation_6d_to_matrix(x_rot) # shape: (batch_size, num_joints, joints, 3,3)
+        x_rot = x_rot.view(batch_size, seq_len, num_joints, 9)
+        # append zero to the translation
+        trans_zero_padding = torch.zeros(batch_size, seq_len,1, 3).to(x.device)
+        x_trans = torch.cat([x_trans.unsqueeze(2), trans_zero_padding], dim=-1) # shape: (batch_size, seq_len, 1, 9)
+        x = torch.cat([x_trans, x_rot], dim=2) # output shape: (batch_size, seq_len, num_joints+1, 9)
         return x
 
 
@@ -62,7 +146,7 @@ class KeypointModel(pl.LightningModule):
     def __init__(self):
         super(KeypointModel, self).__init__()
         self.model = RotationTranslationNet().to(self.device)
-        self.mse_loss = nn.MSELoss()
+        self.mse_loss = self.mpjpe
         self.motorica_dummy_data = load_dummy_motorica_data()
         self.smpl_model_path = Path("/fs/nexus-projects/PhysicsFall/data/smpl/models")
         if not self.smpl_model_path.exists():
@@ -70,6 +154,9 @@ class KeypointModel(pl.LightningModule):
                 f"SMPL model path {self.smpl_model_path} does not exist."
             )
         self.keypoint_fk = ForwardKinematics()
+
+    def mpjpe(self,pred, ref):
+        return torch.mean(torch.norm(pred - ref, p=2, dim=-1))
 
     def forward(self, x):
         return self.model(x)
@@ -207,7 +294,7 @@ class KeypointModel(pl.LightningModule):
         # output size: (batch_size, len_of_sequence, 20, 3)
         batch_size, len_of_sequence, num_joints = keypoint_data.shape[:3]
         keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, 3)
-        keypoint_position = self.keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+        keypoint_position = self.keypoint_fk(keypoint_data.reshape(-1, 60))
         keypoint_position = keypoint_position.reshape(batch_size, len_of_sequence, -1, 3)
         return keypoint_position
 
@@ -222,13 +309,45 @@ class KeypointModel(pl.LightningModule):
             self.device
         )  # size (batch_size, 1+19, 9)
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
+
+        # for debugging
+        self.model = self.model.double()
+        keypoint_combined = keypoint_combined.double()
+
         predicted_rot_transl = self.model(
             keypoint_combined
         )  # size (batch_size, 1+19, 9)
+        if torch.isnan(predicted_rot_transl).any():
+            print("!!! model output is nan !!!")
+            exit()
         loss = self.loss(
             predicted_rot_transl, keypoint_combined, smpl_batch, reg_weight = 0.1
         )
-        self.log('train_loss', loss,on_epoch=True)
+        # register hook to the loss
+        loss.register_hook(lambda g: _grad_hook(g, "loss"))
+        # check nan
+        self.log('train_loss', loss,on_epoch=True, prog_bar=True)
+        assert loss > 0, f"loss is negative: {loss}"
+        return loss
+    
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self.model.layers, norm_type=2)
+        for key, value in norms.items():
+            if torch.isnan(value).any():
+                print(f"!!! grad norm {key} is nan !!!")
+        self.log_dict(norms)
+
+    def on_after_backward(self):
+        # Check for NaN gradients
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                if torch.isnan(param.grad).any():
+                    print(f"NaN gradient in {name}")
+                if torch.isinf(param.grad).any():
+                    print(f"Inf gradient in {name}")
+
 
     def validation_step(self, batch, batch_idx):
         print("Performing Validation Step")
@@ -280,15 +399,13 @@ class KeypointModel(pl.LightningModule):
         padding_mask = smpl_batch["padding_mask"]
         # remove padding mask from batch
         del smpl_batch["name"]
-        batch_size = keypoint_rot_euler.shape[0]
+        batch_size,seq_length, num_joints, _ = keypoint_rot_euler.shape
         keypoint_rot_mat = self.keypoint_to_rot_mat(keypoint_rot_euler).to(
             self.device
         ) #(batch_size, seq_length, 1+19, 9)
 
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
-        smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=True)
-        smpl_joint_loc = smpl_joint_loc.reshape(batch_size, -1, 24, 3)
-        smpl_vertices = smpl_vertices.reshape(batch_size, -1, 6890, 3)
+        smpl_joint_loc = self.smpl_forward_kinematics(smpl_batch, return_verts=False)
 
         predicted_rot_transl = self.model(keypoint_rot_mat)
         adjusted_keypoint = self.apply_prediction_to_keypoint(
@@ -296,23 +413,67 @@ class KeypointModel(pl.LightningModule):
         ) # (batch_size, len_of_sequence, 20, 3)
         keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
-        # reshape back to batch_size, len_of_sequence, 20, 3
-        keypoint_rot_loc = keypoint_rot_loc.view(batch_size, -1, 19, 3)
-        adjusted_keypoint_loc = adjusted_keypoint_loc.view(batch_size, -1, 19, 3)
-        padding_mask = np.repeat(padding_mask.cpu().numpy(), 19 * 3, axis=1).reshape(batch_size, -1, 19, 3)
+        # padding_mask = np.repeat(padding_mask.cpu().numpy(), 19 * 3, axis=1).reshape(batch_size, -1, 19, 3)
         # adjusted_keypoint_loc = adjusted_keypoint_loc[~padding_mask]
         # keypoint_rot_loc = keypoint_rot_loc[~padding_mask]
+
+        image_folder = prediction_output_dir/'tmp'
+        os.makedirs(image_folder, exist_ok=True)
+
+        video_name = str(prediction_output_dir/file_name[0]) + ".mp4"
         for i in range(batch_size):
-            self.prediction_visualization(
-                input_loc = keypoint_rot_loc[i],
-                smpl_loc = smpl_joint_loc[i], 
-                predicted_loc=adjusted_keypoint_loc[i], 
-                frame_to_visualize=0,
-                output_path=str(prediction_output_dir/file_name[0])+".png")
-            exit()
+            # save as video
+            # for frame in tqdm(range(seq_length), desc="Generating Videos"):
+            #     self.prediction_visualization(
+            #         input_loc = keypoint_rot_loc[i],
+            #         smpl_loc = smpl_joint_loc[i], 
+            #         predicted_loc=adjusted_keypoint_loc[i], 
+            #         frame_to_visualize=frame,
+            #         output_path=str(f"{image_folder}/frame_{frame:04d}.png"))
+            with ThreadPoolExecutor() as executor:
+                result = list(tqdm(
+                    executor.map(
+                        lambda frame: self.prediction_visualization(
+                            input_loc=keypoint_rot_loc[i],
+                            smpl_loc=smpl_joint_loc[i],
+                            predicted_loc=adjusted_keypoint_loc[i],
+                            frame_to_visualize=frame,
+                            output_path=None
+                        ), range(seq_length)
+                    ), desc=f"Generating Video {i+1}/{batch_size}", total=seq_length
+                ))
+        images = []
+        for fig in result:
+            canvas = FigureCanvas(fig)
+            canvas.draw()
+            buf = np.asarray(canvas.buffer_rgba())  # (H, W, 4) format
+            img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+            images.append(img)
+        # compile the video
+        # images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
+        # frame = cv2.imread(os.path.join(image_folder, images[0]))
+        frame = images[0]
+        height, width, layers = frame.shape
 
 
-    def visualize_keypoint_data(self,ax, frame: int, df: pd.DataFrame, skeleton = None):
+        fps = 30  # Set frames per second
+        video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+
+        # for image in images:
+        #     video.write(cv2.imread(os.path.join(image_folder, image)))
+        for image in images:
+            video.write(image)
+
+        cv2.destroyAllWindows()
+        video.release()
+        print(f'Video saved as {video_name}')
+        
+        # remove the images and directory
+        # for image in images:
+        #     os.remove(os.path.join(image_folder, image))
+
+
+    def visualize_keypoint_data(self,ax, frame: int, df: pd.DataFrame, skeleton = None, skeleton_color = "black"):
         if skeleton is None:
             skeleton = get_keypoint_skeleton()
         joint_names = get_motorica_skeleton_names()
@@ -342,7 +503,7 @@ class KeypointModel(pl.LightningModule):
                     [parent_z, child_z],
                     # "k-",
                     lw=4,
-                    c="black",
+                    c=skeleton_color,
                 )
 
             ax.text(
@@ -359,14 +520,10 @@ class KeypointModel(pl.LightningModule):
     # visualize the prediction
     def prediction_visualization(self, input_loc, smpl_loc, predicted_loc, frame_to_visualize = 0, output_path = "predicted_keypoint.png"):
         fig = plt.figure(figsize=(30, 10))
-        # smpl_joint_names = get_SMPL_skeleton_names()
-        # smpl_joints_loc = smpl_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
-        #     # swap from XYZ to ZXY
-        # smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
         smpl_joint_loc_df = self.keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_loc.reshape(-1, 19, 3)))
         # # show all df columns
-        input_loc_ax = fig.add_subplot(141, projection="3d")
-        input_loc_ax = self.visualize_keypoint_data(ax=input_loc_ax, frame=frame_to_visualize, df=smpl_joint_loc_df)
+        input_loc_ax = fig.add_subplot(131, projection="3d")
+        input_loc_ax = self.visualize_keypoint_data(ax=input_loc_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
         input_loc_ax.set_title("SMPL Joint Loc")
         input_loc_ax.set_xlabel('X axis')
         input_loc_ax.set_ylabel('Y axis')
@@ -377,7 +534,7 @@ class KeypointModel(pl.LightningModule):
         input_loc_ax.set_zlim([-1, 1])
 
         predicted_position = self.keypoint_fk.convert_to_dataframe(predicted_loc)
-        predicted_loc_ax = fig.add_subplot(143, projection="3d")
+        predicted_loc_ax = fig.add_subplot(132, projection="3d")
         predicted_loc_ax = self.visualize_keypoint_data(ax=predicted_loc_ax, frame=frame_to_visualize, df=predicted_position)
         predicted_loc_ax.set_title("Predicted Keypoint")
         predicted_loc_ax.set_xlabel('X axis')
@@ -387,20 +544,20 @@ class KeypointModel(pl.LightningModule):
         predicted_loc_ax.set_ylim([-1, 1])
         predicted_loc_ax.set_zlim([-1, 1])
 
-        input_loc = self.keypoint_fk.convert_to_dataframe(input_loc)
-        input_ax = fig.add_subplot(142, projection="3d")
-        input_ax = self.visualize_keypoint_data(ax=input_ax, frame=frame_to_visualize, df=input_loc)
-        input_ax.set_title("Input Keypoint")
-        input_ax.set_xlabel('X axis')
-        input_ax.set_ylabel('Y axis')
-        input_ax.set_zlabel('Z axis')
-        input_ax.set_xlim([-1, 1])
-        input_ax.set_ylim([-1, 1])
-        input_ax.set_zlim([-1, 1])
+        # input_loc = self.keypoint_fk.convert_to_dataframe(input_loc)
+        # input_ax = fig.add_subplot(142, projection="3d")
+        # input_ax = self.visualize_keypoint_data(ax=input_ax, frame=frame_to_visualize, df=input_loc)
+        # input_ax.set_title("Input Keypoint")
+        # input_ax.set_xlabel('X axis')
+        # input_ax.set_ylabel('Y axis')
+        # input_ax.set_zlabel('Z axis')
+        # input_ax.set_xlim([-1, 1])
+        # input_ax.set_ylim([-1, 1])
+        # input_ax.set_zlim([-1, 1])
 
         # overlay the predicted keypoint on the smpl model
-        overlayed_ax = fig.add_subplot(144, projection="3d")
-        overlayed_ax = self.visualize_keypoint_data(ax=overlayed_ax, frame=frame_to_visualize, df=smpl_joint_loc_df)
+        overlayed_ax = fig.add_subplot(133, projection="3d")
+        overlayed_ax = self.visualize_keypoint_data(ax=overlayed_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
         overlayed_ax = self.visualize_keypoint_data(overlayed_ax, frame_to_visualize, predicted_position)
         overlayed_ax.set_title("Overlayed Keypoint")
         overlayed_ax.set_xlabel('X axis')
@@ -410,7 +567,10 @@ class KeypointModel(pl.LightningModule):
         overlayed_ax.set_ylim([-1, 1])
         overlayed_ax.set_zlim([-1, 1])
 
-        plt.savefig(output_path)
+        if output_path:
+            plt.savefig(output_path)
+        else:
+            return fig
 
         
 
@@ -459,6 +619,7 @@ class KeypointModel(pl.LightningModule):
                 "output should be of shape (batch_size, len_of_sequence, 20, 3)"
             )
         return predicted_keypoint
+    
 
     def loss(
         self, predicted_rot_transl, keypoint_batch, smpl_batch, reg_weight=0.1
@@ -472,8 +633,14 @@ class KeypointModel(pl.LightningModule):
         # apply forward kinematics to the smpl data
         smpl_loc = self.smpl_forward_kinematics(smpl_batch)
 
+        assert not torch.isnan(adjusted_keypoint_loc).any(), "adjusted keypoint location is nan"
+        assert not torch.isnan(smpl_loc).any(), "smpl location is nan"
+
         # calculate the loss
         mpjpe_loss = self.mse_loss(adjusted_keypoint_loc, smpl_loc)
+        mpjpe_loss.register_hook(lambda g: _grad_hook(g, "mpjpe_loss"))
+        assert mpjpe_loss > 0, f"mpjpe_loss is negative: {mpjpe_loss}"
+        
 
         # regularization term
         reg_weight = reg_weight
@@ -481,16 +648,25 @@ class KeypointModel(pl.LightningModule):
         identity_mat = torch.eye(3).view(1, 1, 1, 3, 3).repeat(
             batch_size, len_of_sequence, 19, 1, 1
         ).to(self.device)
-        reg_loss = reg_weight * torch.norm(rot_mat - identity_mat, p="fro", dim=(-2, -1)).mean()
+        reg_loss = reg_weight * torch.mean(torch.norm(rot_mat - identity_mat, p=2, dim=(-2,-1)))
+        assert not torch.isnan(rot_mat - identity_mat).any(), "rot_mat - identity_mat is nan"
+        assert reg_loss >= 0, f"reg_loss is negative: {reg_loss}"
+        reg_loss.register_hook(lambda g: _grad_hook(g, "reg_loss"))
         self.log("reg_loss", reg_loss, on_epoch=True)
         self.log("mpjpe_loss", mpjpe_loss, on_epoch=True)
     
         return mpjpe_loss + reg_loss
 
+class StopOnNaNLoss(pl.Callback):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        loss = outputs.get("loss") if isinstance(outputs, dict) else outputs
+        if loss is not None and (loss.isnan().any() or loss.isinf().any()):
+            print("NaN loss detected. Stopping training...")
+            trainer.should_stop = True
 
 def main():
 
-    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/faikt0mo/smpl2keypoint-epoch=79-train_loss=0.38.ckpt")
+    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/ac4bjq4z/smpl2keypoint-epoch=179-train_loss=0.44.ckpt")
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
     # mode = "validate"
@@ -505,22 +681,28 @@ def main():
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_9_with_reg",
-                                # mode = "disabled"
+                                name="train_3",
+                                # mode = "disabled",
+                                notes = "With regularization of 0.1",
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
-    exp_id = wandb_logger.experiment.id
+    exp_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{wandb_logger.experiment.id}"
+    ckpt_saving_dir = saving_dir/exp_id
+    if not ckpt_saving_dir.exists():
+        print(f"Creating directory {ckpt_saving_dir} for saving checkpoints.")
+        ckpt_saving_dir.mkdir(parents=True)
     if not (saving_dir/exp_id).exists():
         (saving_dir/exp_id).mkdir(parents=True)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='train_loss',
-        dirpath=str(saving_dir/exp_id),
+        dirpath=str(ckpt_saving_dir),
         filename='smpl2keypoint-{epoch:02d}-{train_loss:.2f}',
         mode='min',
-        every_n_epochs=30,  
-        save_top_k = -1,
+        save_top_k=5,
+        save_last = True,
     )
-    trainer = Trainer(max_epochs=num_epoch_to_train, logger=wandb_logger, callbacks = [checkpoint_callback])
+    nan_callbacks = StopOnNaNLoss()
+    trainer = Trainer(max_epochs=num_epoch_to_train, logger=wandb_logger, callbacks = [checkpoint_callback, nan_callbacks], gradient_clip_val=1.0)
     if mode == "train":
         trainer.fit(model, data_module.train_dataloader())
     elif mode == "validate":

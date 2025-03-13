@@ -527,6 +527,7 @@ if __name__ == "__main__":
     debug = False  # debug flag
     aist_data_root = Path("/fs/nexus-projects/PhysicsFall/data/AIST++/motions-SMPL")
     smpl_model_path = Path("/fs/nexus-projects/PhysicsFall/data/smpl/models")
+    aist_ignore_file = Path("/fs/nexus-projects/PhysicsFall/data/AIST++/ignore_list.txt")
     output_dir = Path("./data/alignment_dataset")
 
     if not aist_data_root.exists():
@@ -537,9 +538,22 @@ if __name__ == "__main__":
         sys.exit(1)
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
+    if not aist_ignore_file.exists():
+        raise FileNotFoundError(f"Ignore file {aist_ignore_file} does not exist.")
 
     # load all aist data *.pkl files
     aist_data = list(aist_data_root.glob("*.pkl"))
+
+    # read ignore list
+    with open(aist_ignore_file, "r") as f:
+        ignore_list = f.read().splitlines()
+    # remove the ignored files from the list
+    print(f'before removing ignored files: {len(aist_data)}')
+    print(f'ignore list length : {len(ignore_list)}')
+    aist_data = [file for file in aist_data if file.stem not in ignore_list]
+    print(f'after removing ignored files: {len(aist_data)}')
+
+
     print(f"Found {len(aist_data)} AIST++ data files")
     for data_file in tqdm(aist_data, desc="Processing AIST++ data files"):
         print(f"Processing {data_file}")

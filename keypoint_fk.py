@@ -7,6 +7,7 @@ from collections import deque
 from pathlib import Path
 import sys
 import matplotlib.pyplot as plt
+import torch.nn as nn
 
 sys.path.append("../")
 from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
@@ -22,8 +23,9 @@ from smpl2motorica.smpl2keypoint import (
 )
 
 
-class ForwardKinematics:
+class ForwardKinematics(nn.Module):
     def __init__(self):
+        super(ForwardKinematics, self).__init__()
         self.skeleton = get_keypoint_skeleton()
         self.joints = self.skeleton.keys()
         (
@@ -182,7 +184,6 @@ class ForwardKinematics:
         # input shape: (batch_size x num_frames, num_joints x 3)
         if data.dim() !=2 or data.shape[1] != 60:
             raise ValueError("Expect input data to have shape (batch_size x num_frames, num_joints x 3)")
-        print(f'fk: data shape: {data.shape}')
         pos = data[:, :3] # pos shape (num_frames, joint root pos (3 values))
         rot = data[:, 3:]
         num_frames = pos.shape[0]
@@ -193,6 +194,8 @@ class ForwardKinematics:
         rot_values = rot.reshape(num_frames, num_joints, 3)
         # convert rot to rotation matrix
         rot_values = euler_angles_to_matrix(rot_values, self.rotation_orders[0])
+        if torch.isnan(rot_values).any():
+            raise ValueError("NaN values detected in rotation matrix at line 198 of keypoint_fk.py")
         
         global_pos_list = []
         global_rot_list = []
@@ -209,6 +212,8 @@ class ForwardKinematics:
                 # compute rotations
                 parent_rot = global_rot_list[parent]
                 global_rot = torch.bmm(parent_rot, rot_values[:, j,:,:]) 
+                if torch.isnan(global_rot).any():
+                    raise ValueError("NaN values detected in global rotation matrix at line 214 of keypoint_fk.py")
                 global_rot_list.append(global_rot)
 
                 # compuate positions
@@ -217,11 +222,34 @@ class ForwardKinematics:
                 local_pose = self.offsets[j].expand(batch_size, -1)
                 #parent_rot: torch.Size([num_frame, 3, 3]); local_pose: torch.Size([num_frame, 3])
                 rotated_offset = torch.bmm(global_rot_list[parent],local_pose.unsqueeze(-1)).squeeze(-1)
+                if torch.isnan(rotated_offset).any():
+                    raise ValueError("NaN values detected in rotated offset at line 224 of keypoint_fk.py")
                 global_pos = global_pos_list[parent] + rotated_offset
                 global_pos_list.append(global_pos)
 
         global_pos = torch.stack(global_pos_list, dim=1) # joint order in self.joint_names
         return global_pos
+    
+    def backward(self, grad_output):
+        # check incoming gradient
+        if torch.isnan(grad_output).any():
+            raise ValueError("NaN values detected in incoming gradient of forward kinematics")
+    
+        # compute gradient automatically
+        grad_input = torch.autograd.grad(
+            outputs=grad_output,
+            inputs=self.parameters(),
+            grad_outputs=grad_output,
+            create_graph=True,
+            retain_graph=True,
+        )
+        if grad_input is None:
+            raise ValueError("Failed to compute gradient for forward kinematics")
+        # check if any gradient is NaN
+        if any(torch.isnan(g).any() for g in grad_input):
+            raise ValueError("NaN values detected in gradient of forward kinematics")
+        return grad_input
+
         
     
     def convert_to_dataframe(self, positions):
