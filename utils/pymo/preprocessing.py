@@ -345,12 +345,10 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
 
                     # add the position channel to the offset and store it in k, for every frame i
                     k = pos_values + np.asarray(track.skeleton[joint]["offsets"])
-
                     # multiply k to the rotmat of the parent for every frame i
                     q = (
                         tree_data[parent][0] * k
                     )  # np.matmul(k.reshape(k.shape[0],1,3), tree_data[parent][0])
-
                     # add q to the position of the parent, for every frame i
                     tree_data[joint][1] = (
                         tree_data[parent][1] + q

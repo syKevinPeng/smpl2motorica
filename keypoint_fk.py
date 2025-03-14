@@ -24,10 +24,17 @@ from smpl2motorica.smpl2keypoint import (
 
 
 class ForwardKinematics(nn.Module):
-    def __init__(self):
+    def __init__(self, skeleton = None, selected_joints = None):
         super(ForwardKinematics, self).__init__()
-        self.skeleton = get_keypoint_skeleton()
-        self.joints = self.skeleton.keys()
+        if skeleton:
+            self.skeleton = skeleton
+        else:
+            self.skeleton = get_keypoint_skeleton()
+        if selected_joints is not None:
+            self.joint_names = selected_joints
+        else:
+            self.joint_names = self.skeleton.keys()
+        # self.joints = self.skeleton.keys()
         (
             self.joint_names,
             self.parents,
@@ -82,7 +89,7 @@ class ForwardKinematics(nn.Module):
         queue = deque([root])
         while queue:
             joint = queue.popleft()
-            if joint not in self.joints:
+            if joint not in self.joint_names:
                 continue
             joint_names.append(joint)
             info = skeleton[joint]
@@ -124,6 +131,7 @@ class ForwardKinematics(nn.Module):
         rot_tensor = torch.zeros((num_frames, num_joints, 3), dtype=torch.float32)
 
         for j, joint in enumerate(self.joint_names):
+            print(f'processing joint: {joint}, index: {j}')
             # Handle positions
             if self.has_position[j]:
                 pos_cols = [
@@ -190,13 +198,13 @@ class ForwardKinematics(nn.Module):
         num_joints = len(self.joint_names)
         device = pos.device
         dtype = pos.dtype
-        # rot = torch.deg2rad(rot)
+
         rot_values = rot.reshape(num_frames, num_joints, 3)
         # convert rot to rotation matrix
         rot_values = euler_angles_to_matrix(rot_values, self.rotation_orders[0])
         if torch.isnan(rot_values).any():
-            raise ValueError("NaN values detected in rotation matrix at line 198 of keypoint_fk.py")
-        
+            raise ValueError(f"NaN values detected in rotation matrix at line 206 of keypoint_fk.py\nrot_values: {rot_values} \nrot shape: {rot.shape} \nrot values: {rot_values}")
+    
         global_pos_list = []
         global_rot_list = []
         self.offsets = self.offsets.to(device=device, dtype=dtype)
@@ -223,7 +231,7 @@ class ForwardKinematics(nn.Module):
                 #parent_rot: torch.Size([num_frame, 3, 3]); local_pose: torch.Size([num_frame, 3])
                 rotated_offset = torch.bmm(global_rot_list[parent],local_pose.unsqueeze(-1)).squeeze(-1)
                 if torch.isnan(rotated_offset).any():
-                    raise ValueError("NaN values detected in rotated offset at line 224 of keypoint_fk.py")
+                    raise ValueError("NaN values detected in rotated offset at line 234 of keypoint_fk.py")
                 global_pos = global_pos_list[parent] + rotated_offset
                 global_pos_list.append(global_pos)
 

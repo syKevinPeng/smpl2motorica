@@ -18,12 +18,12 @@ def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
     On the Continuity of Rotation Representations in Neural Networks.
     IEEE Conference on Computer Vision and Pattern Recognition, 2019.
     Retrieved from http://arxiv.org/abs/1812.07035
-    """
+    """ 
 
     a1, a2 = d6[..., :3], d6[..., 3:]
-    b1 = F.normalize(a1, dim=-1)
+    b1 = F.normalize(a1, dim=-1, eps=1e-6)
     b2 = a2 - (b1 * a2).sum(-1, keepdim=True) * b1
-    b2 = F.normalize(b2, dim=-1)
+    b2 = F.normalize(b2, dim=-1, eps=1e-6)
     b3 = torch.cross(b1, b2, dim=-1)
     return torch.stack((b1, b2, b3), dim=-2)
 
