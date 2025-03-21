@@ -23,7 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 import wandb
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 from smpl2motorica.dataloader import AlignmentDataModule
-from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
+from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton, get_keypoint_skeleton_scale
+from smpl2motorica.utils.keypoint_visualization import visualize_keypoint_data
 from smpl2motorica.smpl2keypoint import (
     load_dummy_motorica_data,
     get_SMPL_skeleton_names,
@@ -37,7 +38,7 @@ from smpl2motorica.smpl2keypoint import (
 from smpl2motorica.utils.conti_angle_rep import rotation_6d_to_matrix, matrix_to_rotation_6d
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.utils.pymo.Quaternions import Quaternions
-from smpl2motorica.keypoint_fk import ForwardKinematics
+from KeypointFK.keypoint_fk import ForwardKinematics
 from datetime import datetime
 
 def grad_hook(module, grad_input, grad_output):
@@ -360,7 +361,6 @@ class KeypointModel(pl.LightningModule):
 
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
         smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=False)
-        # smpl_joint_loc = smpl_joint_loc.reshape(batch_size, -1, 24, 3)
 
         # all ways predict zeros and identity matrix
         predicted_rot_transl = torch.zeros_like(keypoint_rot_mat)
@@ -411,111 +411,69 @@ class KeypointModel(pl.LightningModule):
         adjusted_keypoint = self.apply_prediction_to_keypoint(
             predicted_rot_transl, keypoint_rot_mat
         ) # (batch_size, len_of_sequence, 20, 3)
+
+        default_skeleton = get_keypoint_skeleton()
+        default_scale = get_keypoint_skeleton_scale()
         keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
-        # padding_mask = np.repeat(padding_mask.cpu().numpy(), 19 * 3, axis=1).reshape(batch_size, -1, 19, 3)
-        # adjusted_keypoint_loc = adjusted_keypoint_loc[~padding_mask]
-        # keypoint_rot_loc = keypoint_rot_loc[~padding_mask]
-
-        image_folder = prediction_output_dir/'tmp'
-        os.makedirs(image_folder, exist_ok=True)
-
-        video_name = str(prediction_output_dir/file_name[0]) + ".mp4"
-        for i in range(batch_size):
-            # save as video
-            # for frame in tqdm(range(seq_length), desc="Generating Videos"):
-            #     self.prediction_visualization(
-            #         input_loc = keypoint_rot_loc[i],
-            #         smpl_loc = smpl_joint_loc[i], 
-            #         predicted_loc=adjusted_keypoint_loc[i], 
-            #         frame_to_visualize=frame,
-            #         output_path=str(f"{image_folder}/frame_{frame:04d}.png"))
-            with ThreadPoolExecutor() as executor:
-                result = list(tqdm(
-                    executor.map(
-                        lambda frame: self.prediction_visualization(
-                            input_loc=keypoint_rot_loc[i],
-                            smpl_loc=smpl_joint_loc[i],
-                            predicted_loc=adjusted_keypoint_loc[i],
-                            frame_to_visualize=frame,
-                            output_path=None
-                        ), range(seq_length)
-                    ), desc=f"Generating Video {i+1}/{batch_size}", total=seq_length
-                ))
-        images = []
-        for fig in result:
-            canvas = FigureCanvas(fig)
-            canvas.draw()
-            buf = np.asarray(canvas.buffer_rgba())  # (H, W, 4) format
-            img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
-            images.append(img)
-        # compile the video
-        # images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
-        # frame = cv2.imread(os.path.join(image_folder, images[0]))
-        frame = images[0]
-        height, width, layers = frame.shape
-
-
-        fps = 30  # Set frames per second
-        video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-
-        # for image in images:
-        #     video.write(cv2.imread(os.path.join(image_folder, image)))
-        for image in images:
-            video.write(image)
-
-        cv2.destroyAllWindows()
-        video.release()
-        print(f'Video saved as {video_name}')
         
-        # remove the images and directory
+        joint_order = ["Hips_Xposition", "Hips_Yposition","Hips_Zposition"] + expand_skeleton(get_motorica_skeleton_names())
+        # save the prediction as npy file
+        keypoint_dict = {
+        "file_name": file_name,
+        "skeleton": default_skeleton,
+        "scale": default_scale,
+        "motion_data": adjusted_keypoint,
+        "motion_data_order": joint_order,
+        "fps": 30,
+        "motion_positions": adjusted_keypoint_loc,
+        "motion_positions_order": get_motorica_skeleton_names(),
+        }
+        with open(prediction_output_dir/f"{file_name[0]}.npy", "wb") as f:
+            np.save(f, keypoint_dict)
+
+
+        # image_folder = prediction_output_dir/'tmp'
+        # os.makedirs(image_folder, exist_ok=True)
+
+        # video_name = str(prediction_output_dir/file_name[0]) + ".mp4"
+        # for i in range(batch_size):
+        #     with ThreadPoolExecutor() as executor:
+        #         result = list(tqdm(
+        #             executor.map(
+        #                 lambda frame: self.prediction_visualization(
+        #                     input_loc=keypoint_rot_loc[i],
+        #                     smpl_loc=smpl_joint_loc[i],
+        #                     predicted_loc=adjusted_keypoint_loc[i],
+        #                     frame_to_visualize=frame,
+        #                     output_path=None
+        #                 ), range(seq_length)
+        #             ), desc=f"Generating Video {i+1}/{batch_size}", total=seq_length
+        #         ))
+        # images = []
+        # for fig in result:
+        #     canvas = FigureCanvas(fig)
+        #     canvas.draw()
+        #     buf = np.asarray(canvas.buffer_rgba())  # (H, W, 4) format
+        #     img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+        #     images.append(img)
+        # # compile the video
+        # frame = images[0]
+        # height, width, layers = frame.shape
+
+
+        # fps = 30  # Set frames per second
+        # video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
         # for image in images:
-        #     os.remove(os.path.join(image_folder, image))
+        #     video.write(image)
 
-
-    def visualize_keypoint_data(self,ax, frame: int, df: pd.DataFrame, skeleton = None, skeleton_color = "black"):
-        if skeleton is None:
-            skeleton = get_keypoint_skeleton()
-        joint_names = get_motorica_skeleton_names()
-        for idx, joint in enumerate(joint_names):
-            # ^ In mocaps, Y is the up-right axis
-            # print(df[f"{joint}_Xposition"])
-            # print(f'frame: {frame}, joint: {joint}')
-            parent_x = df[f"{joint}_Xposition"].iloc[frame]
-            parent_y = df[f"{joint}_Zposition"].iloc[frame]
-            parent_z = df[f"{joint}_Yposition"].iloc[frame]
-            # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
-            ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
-
-            children_to_draw = [
-                c for c in skeleton[joint]["children"] if c in joint_names
-            ]
-
-            for c in children_to_draw:
-                # ^ In mocaps, Y is the up-right axis
-                child_x = df[f"{c}_Xposition"].iloc[frame]
-                child_y = df[f"{c}_Zposition"].iloc[frame]
-                child_z = df[f"{c}_Yposition"].iloc[frame]
-                
-                ax.plot(
-                    [parent_x, child_x],
-                    [parent_y, child_y],
-                    [parent_z, child_z],
-                    # "k-",
-                    lw=4,
-                    c=skeleton_color,
-                )
-
-            ax.text(
-                x=parent_x - 0.01,
-                y=parent_y - 0.01,
-                z=parent_z - 0.01,
-                s=f"{idx}:{joint}",
-                fontsize=5,
-            )
+        # cv2.destroyAllWindows()
+        # video.release()
+        # print(f'Video saved as {video_name}')
         
+        # # remove the images and directory
+        # os.remove(os.path.join(image_folder))
 
-        return ax
     
     # visualize the prediction
     def prediction_visualization(self, input_loc, smpl_loc, predicted_loc, frame_to_visualize = 0, output_path = "predicted_keypoint.png"):
@@ -523,7 +481,7 @@ class KeypointModel(pl.LightningModule):
         smpl_joint_loc_df = self.keypoint_fk.convert_to_dataframe(positions=torch.tensor(smpl_loc.reshape(-1, 19, 3)))
         # # show all df columns
         input_loc_ax = fig.add_subplot(131, projection="3d")
-        input_loc_ax = self.visualize_keypoint_data(ax=input_loc_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
+        input_loc_ax = visualize_keypoint_data(ax=input_loc_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
         input_loc_ax.set_title("SMPL Joint Loc")
         input_loc_ax.set_xlabel('X axis')
         input_loc_ax.set_ylabel('Y axis')
@@ -535,7 +493,7 @@ class KeypointModel(pl.LightningModule):
 
         predicted_position = self.keypoint_fk.convert_to_dataframe(predicted_loc)
         predicted_loc_ax = fig.add_subplot(132, projection="3d")
-        predicted_loc_ax = self.visualize_keypoint_data(ax=predicted_loc_ax, frame=frame_to_visualize, df=predicted_position)
+        predicted_loc_ax = visualize_keypoint_data(ax=predicted_loc_ax, frame=frame_to_visualize, df=predicted_position)
         predicted_loc_ax.set_title("Predicted Keypoint")
         predicted_loc_ax.set_xlabel('X axis')
         predicted_loc_ax.set_ylabel('Y axis')
@@ -557,8 +515,8 @@ class KeypointModel(pl.LightningModule):
 
         # overlay the predicted keypoint on the smpl model
         overlayed_ax = fig.add_subplot(133, projection="3d")
-        overlayed_ax = self.visualize_keypoint_data(ax=overlayed_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
-        overlayed_ax = self.visualize_keypoint_data(overlayed_ax, frame_to_visualize, predicted_position)
+        overlayed_ax = visualize_keypoint_data(ax=overlayed_ax, frame=frame_to_visualize, df=smpl_joint_loc_df, skeleton_color = "red")
+        overlayed_ax = visualize_keypoint_data(overlayed_ax, frame_to_visualize, predicted_position)
         overlayed_ax.set_title("Overlayed Keypoint")
         overlayed_ax.set_xlabel('X axis')
         overlayed_ax.set_ylabel('Y axis')
@@ -666,23 +624,23 @@ class StopOnNaNLoss(pl.Callback):
 
 def main():
 
-    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/ac4bjq4z/smpl2keypoint-epoch=179-train_loss=0.44.ckpt")
+    ckpt = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints/20250316_233834_fmh4zb2i/smpl2keypoint-epoch=139-train_loss=0.10.ckpt")
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
     # mode = "validate"
-    # mode = "predict"
-    mode = "train"
-    num_epoch_to_train = 300
+    mode = "predict"
+    # mode = "train"
+    num_epoch_to_train = 1
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 16
+    batch_size = 1
     num_workers = 4
 
     data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_3",
-                                # mode = "disabled",
+                                name="train_4",
+                                mode = "disabled",
                                 notes = "With regularization of 0.1",
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")

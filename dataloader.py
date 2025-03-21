@@ -20,9 +20,10 @@ from smpl2keypoint import (
     expand_skeleton,
     get_motorica_skeleton_names,
     motorica_to_smpl_mapping,
-    skeleton_scaler
+    skeleton_scaler,
+    SMPL_visulize_a_frame,
 )
-from keypoint_fk import ForwardKinematics
+from KeypointFK.keypoint_fk import ForwardKinematics
 from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
 
 
@@ -364,7 +365,7 @@ class AlignmentDataModule(pl.LightningDataModule):
     def predict_dataloader(self):
         return DataLoader(
             self.predict_dataset,
-            batch_size=self.batch_size,
+            batch_size=1,
             shuffle=False,
             num_workers=1,
             collate_fn=self.collate_fn,
@@ -377,48 +378,6 @@ class AlignmentDataModule(pl.LightningDataModule):
         elif self.mode == "predict":
             return self.predict_dataloader()
         
-    
-def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
-    if skeleton is None:
-        skeleton = get_keypoint_skeleton()
-    joint_names = get_motorica_skeleton_names()
-    for idx, joint in enumerate(joint_names):
-        # ^ In mocaps, Y is the up-right axis
-        parent_x = df[f"{joint}_Xposition"].iloc[frame]
-        parent_y = df[f"{joint}_Zposition"].iloc[frame]
-        parent_z = df[f"{joint}_Yposition"].iloc[frame]
-        # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
-        ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
-
-        children_to_draw = [
-            c for c in skeleton[joint]["children"] if c in joint_names
-        ]
-
-        for c in children_to_draw:
-            # ^ In mocaps, Y is the up-right axis
-            child_x = df[f"{c}_Xposition"].iloc[frame]
-            child_y = df[f"{c}_Zposition"].iloc[frame]
-            child_z = df[f"{c}_Yposition"].iloc[frame]
-            
-            ax.plot(
-                [parent_x, child_x],
-                [parent_y, child_y],
-                [parent_z, child_z],
-                # "k-",
-                lw=4,
-                c="black",
-            )
-
-        ax.text(
-            x=parent_x - 0.01,
-            y=parent_y - 0.01,
-            z=parent_z - 0.01,
-            s=f"{idx}:{joint}",
-            fontsize=5,
-        )
-    
-
-    return ax
 
 def main():
     data_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset")
@@ -432,48 +391,66 @@ def main():
     data_module = AlignmentDataModule(data_dir, batch_size=1, num_workers=1, mode="predict")
     alighment_dataset  = data_module.get_dataloader()
     print(f'len of alignment dataset: {len(alighment_dataset)}')
+
     for keypoint, smpl in alighment_dataset:
-        print(f'keypoint shape: {keypoint.shape}')
+        smpl_batch = smpl
+        keypoint_data = keypoint
         break
-    
 
-    # # # For visualization and testing
-    # i_th_data = 0
-    # for i, (keypoint_data, smpl_batch) in enumerate(alighment_dataset):
-    #     if i == i_th_data:
-    #         break
+    keypoint_fk = ForwardKinematics()
+    batch_size, len_of_sequence, _ ,_= keypoint_data.shape
+    print(f'batch_size: {batch_size}, len_of_sequence: {len_of_sequence}')
+
+    # # processing SMPL data
+    pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
+    transl = smpl_batch["smpl_transl"].reshape(-1, 3)
+    global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
+
+    smpl_model = smplx.create(
+        model_path=smpl_model_path,
+        model_type="smpl",
+        return_verts=True,
+        batch_size=len(pose),
+    )
+    debug_transl = torch.tensor([0,0.25,0], dtype=torch.float32).repeat(len(transl), 1)
+    smpl_output = smpl_model(
+        # global_orient=torch.tensor(global_orient, dtype=torch.float32),
+        # body_pose=torch.tensor(pose, dtype=torch.float32),
+        # transl=torch.tensor(transl, dtype=torch.float32),
+        transl = debug_transl,
+        scaling = torch.tensor([0.1], dtype=torch.float32)
+    )
+    smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
+    smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
+    smpl_joints_loc = smpl_joints_loc[:, :24, :]
+    smpl_joint_names = get_SMPL_skeleton_names()
+    smpl_joints_loc_keypoint_order = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+    # swap from XYZ to ZXY
+    smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order[:, :, [2, 0, 1]]
+    smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order.reshape(batch_size, -1, 19, 3)
+
+    frame = 30
+    fig = plt.figure(figsize=(20, 10))
+    smpl_ax = fig.add_subplot(121, projection="3d")
+    SMPL_visulize_a_frame(smpl_ax, smpl_joints_loc[frame],smpl_vertices[frame], model = smpl_model)
+    smpl_ax.set_title("SMPL Model")
+    smpl_ax.set_xlim(-1,1)
+    smpl_ax.set_ylim(-1,1)
+    smpl_ax.set_zlim(-1,1)
+    smpl_ax.view_init(-90, 0)
+
+    keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+    print(keypoint_data_loc.shape)
+    # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
+    # keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
 
 
-    # keypoint_fk = ForwardKinematics()
-    # batch_size, len_of_sequence, _ = smpl_batch["smpl_body_pose"].shape
 
-    # # # processing SMPL data
-    # pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
-    # transl = smpl_batch["smpl_transl"].reshape(-1, 3)
-    # global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
-
-    # smpl_model = smplx.create(
-    #     model_path=smpl_model_path,
-    #     model_type="smpl",
-    #     return_verts=True,
-    #     batch_size=len(pose),
-    # )
-    # smpl_output = smpl_model(
-    #     global_orient=torch.tensor(global_orient, dtype=torch.float32),
-    #     body_pose=torch.tensor(pose, dtype=torch.float32),
-    #     transl=torch.tensor(transl, dtype=torch.float32),
-    # )
-    # smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
-    # smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
-    # smpl_joints_loc = smpl_joints_loc[:, :24, :]
-    # smpl_joint_names = get_SMPL_skeleton_names()
-    # smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
-    #     # swap from XYZ to ZXY
-    # smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
+    fig.savefig("debug.png")
 
 
 
-    # frame = 30
+
     
     # keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
     # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)

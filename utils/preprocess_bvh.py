@@ -1,12 +1,16 @@
 # preprocessing bvh data into npy
 from pathlib import Path
 import sys
+
+from matplotlib import pyplot as plt
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 from smpl2motorica.utils.bvh import BVHParser
 from smpl2motorica.smpl2keypoint import get_motorica_skeleton_names, expand_skeleton
-from smpl2motorica.keypoint_fk import ForwardKinematics
+from KeypointFK.keypoint_fk import ForwardKinematics
 import torch
 import numpy as np
+from keypoint_visualization import visualize_keypoint_data
+import pandas as pd
 
 def parse_bvh_file(bvh_file_path: Path):
     """
@@ -18,24 +22,47 @@ def parse_bvh_file(bvh_file_path: Path):
     motion_df = motion_data.values
     frame_rate = motion_data.framerate
     file_name = bvh_file_path.stem
+    scaling_factor = 100
+    # scale the skeleton
+    for k, v in skeleton.items():
+        v["offsets"] = np.array(v["offsets"]) / 100
 
+    skeleton_names = ["Hips_Xposition","Hips_Yposition", "Hips_Zposition"] + get_motorica_skeleton_names()
     # reorder the dataframe
-    skeleton_names = [
+    pos_df = motion_df[[
         "Hips_Xposition",
         "Hips_Yposition",
         "Hips_Zposition",
-    ] + expand_skeleton(get_motorica_skeleton_names())
-    motion_data = motion_df[skeleton_names].to_numpy().reshape(-1, len(get_motorica_skeleton_names())+1, 3)
+    ]]
+    # reset starting position to 0,0,0
+    pos_df = pos_df - pos_df.iloc[0]
+    rot_df = motion_df[expand_skeleton(get_motorica_skeleton_names())]
+    rot_df = rot_df.apply(np.deg2rad)
+    motion_df = pd.concat([pos_df, rot_df], axis=1)
+    motion_data = motion_df.to_numpy().reshape(-1, 20, 3)
     motion_positions = forward_kinematics(motion_data, skeleton)
+
     data = {
         "file_name": file_name,
         "skeleton": skeleton,
+        "scale": scaling_factor,
         "motion_data": motion_data,
         "motion_data_order": skeleton_names,
-        "frame_rate": frame_rate,
+        "fps": int(1/frame_rate),
         "motion_positions": motion_positions,
         "motion_positions_order": get_motorica_skeleton_names(),
     }
+
+    # fk = ForwardKinematics(skeleton, selected_joints=get_motorica_skeleton_names())
+    # motion_df = fk.convert_to_dataframe(motion_positions)
+    # fig = plt.figure(figsize=(10, 10))
+    # ax = fig.add_subplot(111, projection='3d')
+    # ax = visualize_keypoint_data(ax, 10, motion_df)
+    # ax.set_xlim([-1, 1])
+    # ax.set_ylim([-1, 1])
+    # ax.set_zlim([-1, 1])
+    # plt.savefig(f"{file_name}.png")
+    # exit()
     # root = "Hips"
     return data
 

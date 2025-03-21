@@ -591,7 +591,7 @@ if __name__ == "__main__":
         rotated_smpl_root_rot = smpl_root_rot.as_rotvec()
         rotated_smpl_root_rot = torch.tensor(rotated_smpl_root_rot, dtype=torch.float32)
         # # Rotate the body translation as well
-        rotated_root_trans = smpl_root_rot.apply(root_trans)
+        rotated_root_trans = (additiona_rot_offset * rot_offset).apply(root_trans)
         # rotated_root_trans += pelvis_offset
         rotated_root_trans = torch.tensor(rotated_root_trans, dtype=torch.float32)
 
