@@ -387,7 +387,7 @@ def main():
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
     
-    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=False)
+    dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=True)
     data_module = AlignmentDataModule(data_dir, batch_size=1, num_workers=1, mode="predict")
     alighment_dataset  = data_module.get_dataloader()
     print(f'len of alignment dataset: {len(alighment_dataset)}')
@@ -414,11 +414,11 @@ def main():
     )
     debug_transl = torch.tensor([0,0.25,0], dtype=torch.float32).repeat(len(transl), 1)
     smpl_output = smpl_model(
-        # global_orient=torch.tensor(global_orient, dtype=torch.float32),
-        # body_pose=torch.tensor(pose, dtype=torch.float32),
-        # transl=torch.tensor(transl, dtype=torch.float32),
-        transl = debug_transl,
-        scaling = torch.tensor([0.1], dtype=torch.float32)
+        global_orient=torch.tensor(global_orient, dtype=torch.float32),
+        body_pose=torch.tensor(pose, dtype=torch.float32),
+        transl=torch.tensor(transl, dtype=torch.float32),
+        # transl = debug_transl,
+        # scaling = torch.tensor([0.1], dtype=torch.float32)
     )
     smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
     smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()

@@ -223,8 +223,8 @@ def motorica_draw_stickfigure3d(
     for idx, joint in enumerate(joints_to_draw):
         # ^ In mocaps, Y is the up-right axis
         parent_x = df[f"{joint}_Xposition"].iloc[frame]
-        parent_y = df[f"{joint}_Zposition"].iloc[frame]
-        parent_z = df[f"{joint}_Yposition"].iloc[frame]
+        parent_y = df[f"{joint}_Yposition"].iloc[frame]
+        parent_z = df[f"{joint}_Zposition"].iloc[frame]
         ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
         children_to_draw = [
             c for c in mocap_track.skeleton[joint]["children"] if c in joints_to_draw
@@ -233,8 +233,8 @@ def motorica_draw_stickfigure3d(
         for c in children_to_draw:
             # ^ In mocaps, Y is the up-right axis
             child_x = df[f"{c}_Xposition"].iloc[frame]
-            child_y = df[f"{c}_Zposition"].iloc[frame]
-            child_z = df[f"{c}_Yposition"].iloc[frame]
+            child_y = df[f"{c}_Yposition"].iloc[frame]
+            child_z = df[f"{c}_Zposition"].iloc[frame]
             
             ax.plot(
                 [parent_x, child_x],
@@ -434,8 +434,8 @@ def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
     for idx, joint in enumerate(joint_names):
         # ^ In mocaps, Y is the up-right axis
         parent_x = df[f"{joint}_Xposition"].iloc[frame]
-        parent_y = df[f"{joint}_Zposition"].iloc[frame]
-        parent_z = df[f"{joint}_Yposition"].iloc[frame]
+        parent_y = df[f"{joint}_Yposition"].iloc[frame]
+        parent_z = df[f"{joint}_Zposition"].iloc[frame]
         # print(f'joint: {joint}: parent_x: {parent_x}, parent_y: {parent_y}, parent_z: {parent_z}')
         ax.scatter(xs=parent_x, ys=parent_y, zs=parent_z, alpha=0.6, c="b", marker="o")
 
@@ -446,8 +446,8 @@ def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
         for c in children_to_draw:
             # ^ In mocaps, Y is the up-right axis
             child_x = df[f"{c}_Xposition"].iloc[frame]
-            child_y = df[f"{c}_Zposition"].iloc[frame]
-            child_z = df[f"{c}_Yposition"].iloc[frame]
+            child_y = df[f"{c}_Yposition"].iloc[frame]
+            child_z = df[f"{c}_Zposition"].iloc[frame]
             
             ax.plot(
                 [parent_x, child_x],
@@ -575,9 +575,6 @@ if __name__ == "__main__":
         # get the joints
         smpl_body_pose = poses[:, 3:]
         smpl_root_rot = poses[:, :3]
-        # apply pelvis offset
-        # pelvis_offset = get_smpl_pelvis_offset(global_trans=root_trans, global_rot=smpl_root_rot, joint_rot=smpl_body_pose)
-        # root_trans = root_trans - pelvis_offset
 
         smpl_root_rot = torch.tensor(smpl_root_rot, dtype=torch.float32)
         smpl_body_pose = torch.tensor(smpl_body_pose, dtype=torch.float32)
@@ -585,13 +582,14 @@ if __name__ == "__main__":
 
         # rotate the SMPL pose to Motorica Pose
         smpl_root_rot = R.from_euler("xyz", smpl_root_rot, degrees=False)
-        rot_offset = R.from_euler("z",  -np.pi / 2, degrees=False)
-        additiona_rot_offset = R.from_euler("x", -np.pi / 2 , degrees=False)
-        smpl_root_rot = additiona_rot_offset * rot_offset * smpl_root_rot
+        # after swapping axis
+        smpl_rot_offset = R.from_euler("y",  -np.pi/2, degrees=False)
+
+        smpl_root_rot = smpl_rot_offset * smpl_root_rot
         rotated_smpl_root_rot = smpl_root_rot.as_rotvec()
         rotated_smpl_root_rot = torch.tensor(rotated_smpl_root_rot, dtype=torch.float32)
         # # Rotate the body translation as well
-        rotated_root_trans = (additiona_rot_offset * rot_offset).apply(root_trans)
+        rotated_root_trans = (smpl_rot_offset).apply(root_trans)
         # rotated_root_trans += pelvis_offset
         rotated_root_trans = torch.tensor(rotated_root_trans, dtype=torch.float32)
 
@@ -625,14 +623,22 @@ if __name__ == "__main__":
 
         # reorder the columns
         keypoint_smpl_df = smpl_joints_df[motorica_joint_names]
-        # convert from radian to degree and keep the same order
-        keypoint_smpl_df = keypoint_smpl_df.apply(np.rad2deg)
         # rename the columns to motorica joint names
         keypoint_smpl_df.columns = expand_skeleton(get_motorica_skeleton_names())
 
         # add root position
-        root_pose_df = pd.DataFrame(root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"])
-        keypoint_smpl_df = pd.concat([root_pose_df, keypoint_smpl_df], axis=1)
+        root_rot_df = keypoint_smpl_df[["Hips_Xrotation", "Hips_Yrotation", "Hips_Zrotation"]]
+        keypoint_root_rot = R.from_euler("xyz", root_rot_df.to_numpy(), degrees=False)
+        rot_offset = R.from_euler("x",  np.pi / 2, degrees=False)
+        keypoint_root_rot = rot_offset * keypoint_root_rot
+        rotated_keypoint_root = keypoint_root_rot.as_rotvec()
+        # # Rotate the body translation as well
+        rotated_root_trans = (rot_offset).apply(root_trans)
+        keypoint_smpl_df.loc[:,["Hips_Xrotation", "Hips_Yrotation", "Hips_Zrotation"]] = rotated_keypoint_root.astype(np.float32)
+        # convert from radian to degree
+        keypoint_smpl_df = keypoint_smpl_df.apply(np.rad2deg)
+        root_trans_df = pd.DataFrame(rotated_root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"])
+        keypoint_smpl_df = pd.concat([root_trans_df, keypoint_smpl_df], axis=1)
 
 
         # save human pose
@@ -712,7 +718,7 @@ if __name__ == "__main__":
             smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
             smpl_loc_df = convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
             smpl_loc_ax = fig.add_subplot(133, projection="3d")
-            smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, 0, smpl_loc_df)
+            smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, 30, smpl_loc_df)
             smpl_loc_ax.set_title("SMPL data in keypoint format")
             smpl_loc_ax.set_xlabel("X")
             smpl_loc_ax.set_ylabel("Y")
@@ -728,3 +734,4 @@ if __name__ == "__main__":
             smpl_loc_ax.view_init(elev=0, azim=90)
             # fig.savefig(f"smpl_frame_{vis_frame:04d}.png")
             save_video(position_df, smpl_loc_df, output_file_name=f"{data_file.stem}_motorica.mp4")
+            exit()

@@ -38,8 +38,8 @@ from smpl2motorica.smpl2keypoint import (
 from smpl2motorica.utils.conti_angle_rep import rotation_6d_to_matrix, matrix_to_rotation_6d
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.utils.pymo.Quaternions import Quaternions
-from KeypointFK.keypoint_fk import ForwardKinematics
 from datetime import datetime
+from editable_dance_project.src.skeleton.forward_kinematics import ForwardKinematics
 
 def grad_hook(module, grad_input, grad_output):
     # Check grad_input (gradients flowing INTO the module)
@@ -154,7 +154,7 @@ class KeypointModel(pl.LightningModule):
             raise FileNotFoundError(
                 f"SMPL model path {self.smpl_model_path} does not exist."
             )
-        self.keypoint_fk = ForwardKinematics()
+        self.keypoint_fk = ForwardKinematics(normalized_skeleton_path="/fs/nexus-projects/PhysicsFall/smpl2motorica/utils/normalized_skeleton.pkl")
 
     def mpjpe(self,pred, ref):
         return torch.mean(torch.norm(pred - ref, p=2, dim=-1))
@@ -291,11 +291,11 @@ class KeypointModel(pl.LightningModule):
         # keypoint data contains the translation and rotation of the keypoints
         # first 3 columns are the translation, and the rest are the rotation that have the same order as motorica2smpl
         # merge the batch dimension with the len_of_sequence dimension
-        # input size: (batch_size, len_of_sequence, 20, 3)
+        # input size: (batch_size, len_of_sequence, 20, 9)
         # output size: (batch_size, len_of_sequence, 20, 3)
-        batch_size, len_of_sequence, num_joints = keypoint_data.shape[:3]
-        keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, 3)
-        keypoint_position = self.keypoint_fk(keypoint_data.reshape(-1, 60))
+        batch_size, len_of_sequence, num_joints,joint_rep = keypoint_data.shape
+        keypoint_data = keypoint_data.view(batch_size*len_of_sequence, num_joints, -1)
+        keypoint_position = self.keypoint_fk(keypoint_data.reshape(batch_size*len_of_sequence, -1))
         keypoint_position = keypoint_position.reshape(batch_size, len_of_sequence, -1, 3)
         return keypoint_position
 
@@ -318,9 +318,6 @@ class KeypointModel(pl.LightningModule):
         predicted_rot_transl = self.model(
             keypoint_combined
         )  # size (batch_size, 1+19, 9)
-        if torch.isnan(predicted_rot_transl).any():
-            print("!!! model output is nan !!!")
-            exit()
         loss = self.loss(
             predicted_rot_transl, keypoint_combined, smpl_batch, reg_weight = 0.1
         )
@@ -360,7 +357,7 @@ class KeypointModel(pl.LightningModule):
         ) #(batch_size, seq_length, 1+19, 9)
 
         smpl_batch = self.smpl_dict_to_cuda(smpl_batch)
-        smpl_joint_loc, smpl_vertices = self.smpl_forward_kinematics(smpl_batch, return_verts=False)
+        smpl_joint_loc = self.smpl_forward_kinematics(smpl_batch, return_verts=False)
 
         # all ways predict zeros and identity matrix
         predicted_rot_transl = torch.zeros_like(keypoint_rot_mat)
@@ -373,14 +370,14 @@ class KeypointModel(pl.LightningModule):
         ) # (batch_size, len_of_sequence, 20, 3)
         keypoint_rot_loc = self.keypoint_forward_kinematics(keypoint_rot_euler)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
-        # for i in range(batch_size):
-        #     self.prediction_visualization(
-        #         input_loc = keypoint_rot_loc[i],
-        #         smpl_loc = smpl_joint_loc[i], 
-        #         predicted_loc=adjusted_keypoint_loc[i], 
-        #         frame_to_visualize=0,
-        #         output_path="validation_output.png")
-        #     exit()
+        for i in range(batch_size):
+            self.prediction_visualization(
+                input_loc = keypoint_rot_loc[i],
+                smpl_loc = smpl_joint_loc[i], 
+                predicted_loc=adjusted_keypoint_loc[i], 
+                frame_to_visualize=0,
+                output_path="validation_output.png")
+            exit()
 
         loss = self.loss(
             predicted_rot_transl, keypoint_rot_mat, smpl_batch, reg_weight=0
@@ -433,46 +430,47 @@ class KeypointModel(pl.LightningModule):
             np.save(f, keypoint_dict)
 
 
-        # image_folder = prediction_output_dir/'tmp'
-        # os.makedirs(image_folder, exist_ok=True)
+        image_folder = prediction_output_dir/'tmp'
+        os.makedirs(image_folder, exist_ok=True)
 
-        # video_name = str(prediction_output_dir/file_name[0]) + ".mp4"
-        # for i in range(batch_size):
-        #     with ThreadPoolExecutor() as executor:
-        #         result = list(tqdm(
-        #             executor.map(
-        #                 lambda frame: self.prediction_visualization(
-        #                     input_loc=keypoint_rot_loc[i],
-        #                     smpl_loc=smpl_joint_loc[i],
-        #                     predicted_loc=adjusted_keypoint_loc[i],
-        #                     frame_to_visualize=frame,
-        #                     output_path=None
-        #                 ), range(seq_length)
-        #             ), desc=f"Generating Video {i+1}/{batch_size}", total=seq_length
-        #         ))
-        # images = []
-        # for fig in result:
-        #     canvas = FigureCanvas(fig)
-        #     canvas.draw()
-        #     buf = np.asarray(canvas.buffer_rgba())  # (H, W, 4) format
-        #     img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
-        #     images.append(img)
-        # # compile the video
-        # frame = images[0]
-        # height, width, layers = frame.shape
+        video_name = str(prediction_output_dir/file_name[0]) + ".mp4"
+        for i in range(batch_size):
+            with ThreadPoolExecutor() as executor:
+                result = list(tqdm(
+                    executor.map(
+                        lambda frame: self.prediction_visualization(
+                            input_loc=keypoint_rot_loc[i],
+                            smpl_loc=smpl_joint_loc[i],
+                            predicted_loc=adjusted_keypoint_loc[i],
+                            frame_to_visualize=frame,
+                            output_path=None
+                        ), range(seq_length)
+                    ), desc=f"Generating Video {i+1}/{batch_size}", total=seq_length
+                ))
+        images = []
+        for fig in result:
+            canvas = FigureCanvas(fig)
+            canvas.draw()
+            buf = np.asarray(canvas.buffer_rgba())  # (H, W, 4) format
+            img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+            images.append(img)
+        # compile the video
+        frame = images[0]
+        height, width, layers = frame.shape
 
 
-        # fps = 30  # Set frames per second
-        # video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-        # for image in images:
-        #     video.write(image)
+        fps = 30  # Set frames per second
+        video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        for image in images:
+            video.write(image)
 
-        # cv2.destroyAllWindows()
-        # video.release()
-        # print(f'Video saved as {video_name}')
+        cv2.destroyAllWindows()
+        video.release()
+        print(f'Video saved as {video_name}')
         
-        # # remove the images and directory
-        # os.remove(os.path.join(image_folder))
+        # remove the images and directory
+        import shutil
+        shutil.rmtree(image_folder)
 
     
     # visualize the prediction
@@ -527,7 +525,9 @@ class KeypointModel(pl.LightningModule):
 
         if output_path:
             plt.savefig(output_path)
+            plt.close()
         else:
+            plt.close()
             return fig
 
         
@@ -552,29 +552,29 @@ class KeypointModel(pl.LightningModule):
         """
 
         batch_size, len_of_sequence, num_joints, _ = keypoint_batch.shape
-        predicted_transl = predicted_rot_transl[:,:, 0, :3]
+        predicted_transl = predicted_rot_transl[:,:, 0, :]
         predicted_rot = predicted_rot_transl[:, :,1:, :].view(
            batch_size, len_of_sequence, 19, 3,3
         )
         # update the keypoint data with the predicted rotation and translation
-        keypoint_transl = keypoint_batch[:, :, 0, :3]
+        keypoint_transl = keypoint_batch[:, :, 0, :]
         keypoint_rot = keypoint_batch[:, :, 1:, :].view(
             batch_size, len_of_sequence, 19, 3, 3
         )
-        adjusted_transl = keypoint_transl + predicted_transl
+        adjusted_transl = keypoint_transl + predicted_transl # shape: (batch_size, len_of_sequence, 9)
         # apply the predicted rotation to the keypoint rotation
 
         adjusted_rot = torch.matmul(predicted_rot, keypoint_rot) # shape: (batch_size, len_of_sequence, 19, 3, 3)
-        # assert torch.allclose(adjusted_rot, keypoint_rot, atol=1e-6), "adjusted rotation and original rotation are not close enough"
-        # convert the rotation matrix to euler angles
-        keypoint_rot = pytorch3d.transforms.matrix_to_euler_angles(
-            adjusted_rot, convention="ZXY" # TODO: check the convention
-        ) #(batch_size, len_of_sequence, 19, 3)
+        keypoint_rot = adjusted_rot.view(batch_size, len_of_sequence, 19, 9)
+        # # convert the rotation matrix to euler angles
+        # keypoint_rot = pytorch3d.transforms.matrix_to_euler_angles(
+        #     adjusted_rot, convention="ZXY" # TODO: check the convention
+        # ) #(batch_size, len_of_sequence, 19, 3)
         # form into the same shape as the original keypoint data
-        predicted_keypoint = torch.cat([adjusted_transl.unsqueeze(-2), keypoint_rot], dim=2) # (batch_size, len_of_sequence, 20, 3)
-        if predicted_keypoint.shape != (batch_size, len_of_sequence, 20, 3):
+        predicted_keypoint = torch.cat([adjusted_transl.unsqueeze(2), keypoint_rot], dim=2) # (batch_size, len_of_sequence, 20, 3)
+        if predicted_keypoint.shape != (batch_size, len_of_sequence, 20, 9):
             raise ValueError(
-                "output should be of shape (batch_size, len_of_sequence, 20, 3)"
+                "output should be of shape (batch_size, len_of_sequence, 20, 9)"
             )
         return predicted_keypoint
     
@@ -586,13 +586,10 @@ class KeypointModel(pl.LightningModule):
         len_of_sequence = keypoint_batch.shape[1]
         adjusted_keypoint = self.apply_prediction_to_keypoint(
             predicted_rot_transl, keypoint_batch
-        ) # (batch_size, len_of_sequence, 20, 3)
+        ) # (batch_size, len_of_sequence, 20, 9)
         adjusted_keypoint_loc = self.keypoint_forward_kinematics(adjusted_keypoint)
         # apply forward kinematics to the smpl data
         smpl_loc = self.smpl_forward_kinematics(smpl_batch)
-
-        assert not torch.isnan(adjusted_keypoint_loc).any(), "adjusted keypoint location is nan"
-        assert not torch.isnan(smpl_loc).any(), "smpl location is nan"
 
         # calculate the loss
         mpjpe_loss = self.mse_loss(adjusted_keypoint_loc, smpl_loc)
@@ -628,20 +625,20 @@ def main():
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint {ckpt} does not exist.")
     # mode = "validate"
-    mode = "predict"
-    # mode = "train"
-    num_epoch_to_train = 1
+    # mode = "predict"
+    mode = "train"
+    num_epoch_to_train = 300
     data_dir = "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
-    batch_size = 1
+    batch_size = 16
     num_workers = 4
 
     data_module = AlignmentDataModule(data_dir, batch_size, num_workers, mode = mode)
 
     model = KeypointModel()
     wandb_logger = WandbLogger(project="SMPL2Keypoint",
-                                name="train_4",
-                                mode = "disabled",
-                                notes = "With regularization of 0.1",
+                                name="train_5",
+                                # mode = "disabled",
+                                notes = "With regularization of 0.1. training after swapping axis",
                                           )
     saving_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/checkpoints")
     exp_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{wandb_logger.experiment.id}"
