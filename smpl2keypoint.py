@@ -20,7 +20,12 @@ sys.path.append("../")
 from smpl2motorica.utils.data import MocapData
 from smpl2motorica.utils.bvh import BVHParser
 from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
-from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
+from editable_dance_project.src.skeleton.utility import get_keypoint_skeleton
+from editable_dance_project.src.skeleton.forward_kinematics import ForwardKinematics
+from editable_dance_project.src.visualization.skeleton import visualize_pd_skeleton
+
+normalize_skeleton_path = "/fs/nexus-projects/PhysicsFall/editable_dance_project/data/normalized_skeleton.pkl"
+
 def get_SMPL_skeleton_names():
     return [
         "pelvis",
@@ -65,10 +70,13 @@ def get_motorica_skeleton_names():
         'Head', 
         'LeftArm', 
         'RightArm', 
+        'LeftToeBase',
+        'RightToeBase',
         'LeftForeArm', 
         'RightForeArm', 
         'LeftHand', 
-        'RightHand'
+        'RightHand',
+
     ]
 def smpl_to_motorica_mapping():
     """
@@ -97,6 +105,8 @@ def smpl_to_motorica_mapping():
             ("right_hip", "RightUpLeg"),
             ("spine2", "Spine"),
             ("spine3", "Spine1"),
+            ("left_foot", "LeftToeBase"),
+            ("right_foot", "RightToeBase"),
         ]
     )
 
@@ -118,6 +128,8 @@ def motorica_to_smpl_mapping():
             ("Head", "head"),
             ("LeftArm", "left_shoulder"),
             ("RightArm", "right_shoulder"),
+            ('LeftToeBase',"left_foot",),
+            ('RightToeBase',"right_foot"),
             ("LeftForeArm", "left_elbow"),
             ("RightForeArm", "right_elbow"),
             ("LeftHand", "left_wrist"),
@@ -427,9 +439,16 @@ def motorica_forward_kinematics(data_df):
     position_df = position_mocap.values
     return position_df, motorica_dummy_data
 
+def _motorica_forward_kinematics(data_df):
+    fk = ForwardKinematics(normalized_skeleton_path=normalize_skeleton_path)
+    position = fk.forward_df(data_df)
+    position_df = fk.convert_to_dataframe(position)
+    return position_df
+
+
 def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
     if skeleton is None:
-        skeleton = get_keypoint_skeleton()
+        skeleton = get_keypoint_skeleton(normalize_skeleton_path)
     joint_names = get_motorica_skeleton_names()
     for idx, joint in enumerate(joint_names):
         # ^ In mocaps, Y is the up-right axis
@@ -467,61 +486,130 @@ def visualize_keypoint_data(ax, frame: int, df: pd.DataFrame, skeleton = None):
         )
     return ax
 
-def save_video(motorica_df, smpl_in_motorica_df, output_file_name = 'sample_motorica_vid.mp4'):
-    image_folder = 'tmp'
-    os.makedirs(image_folder, exist_ok=True)
-    
-    for frame in tqdm(range(len(motorica_df)), desc="Generating Videos"):
-        fig = plt.figure(figsize=(10, 20))
-        motorica_ax = fig.add_subplot(121, projection='3d')
-        motorica_ax = visualize_keypoint_data(motorica_ax, frame, motorica_df )
-        motorica_ax.set_xlabel('X axis')
-        motorica_ax.set_ylabel('Y axis')
-        motorica_ax.set_zlabel('Z axis')
-        motorica_ax.set_zlim([-1, 1])
-        motorica_ax.set_xlim([-1, 1])
-        motorica_ax.set_ylim([-1, 1])
-        motorica_ax.set_title(f"motorica: frame {frame}")
+def create_video_from_keypoints(keypoints, 
+                                output_path, 
+                                skeleton=None, 
+                                fps=30, 
+                                smpl = None,
+                                title='Keypoints', 
+                                max_frames=-1):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        smpl_in_motorica_ax = fig.add_subplot(122, projection='3d')
-        smpl_in_motorica_ax = visualize_keypoint_data(smpl_in_motorica_ax, frame, smpl_in_motorica_df)
-        smpl_in_motorica_ax.set_xlabel('X axis')
-        smpl_in_motorica_ax.set_ylabel('Y axis')
-        smpl_in_motorica_ax.set_zlabel('Z axis')
-        smpl_in_motorica_ax.set_zlim([-1, 1])
-        smpl_in_motorica_ax.set_xlim([-1, 1])
-        smpl_in_motorica_ax.set_ylim([-1, 1])
-        smpl_in_motorica_ax.set_title(f"smpl_in_motorica frame {frame}")
-        motorica_ax.view_init(elev=0, azim=90)
-        smpl_in_motorica_ax.view_init(elev=0, azim=90)
-        plt.savefig(f"{image_folder}/frame_{frame:04d}.png")
-        plt.close(fig)
-    
-    # compile the video
-    video_name = output_file_name
-    images = [img for img in os.listdir(image_folder) if img.endswith(".png")]
-    frame = cv2.imread(os.path.join(image_folder, images[0]))
-    height, width, layers = frame.shape
+    temp_video_path = output_path
 
-    fps = target_fps  # Set frames per second
-    video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    fig = plt.figure(figsize=(20, 10))
 
-    for image in images:
-        video.write(cv2.imread(os.path.join(image_folder, image)))
+    # Draw the figure to get dimensions
+    fig.canvas.draw()
+    # Use buffer_rgba() instead of tostring_rgb()
+    img = np.array(fig.canvas.buffer_rgba())
+    # Convert RGBA to RGB
+    img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+    height, width, _ = img.shape
 
-    cv2.destroyAllWindows()
-    video.release()
-    
-    # remove the images and directory
-    for image in images:
-        os.remove(os.path.join(image_folder, image))
-    os.rmdir(image_folder)
-    
-    return video_name
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    video_writer = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
+    counter = 0
+    for frame in tqdm(range(len(keypoints))):
+        plt.clf()
+
+        ax = fig.add_subplot(121, projection="3d")
+        ax = visualize_pd_skeleton(ax, frame, keypoints, skeleton, gt=None, title=f"keypoint_{title}")
+        ax.set_xlim([-1, 1])
+        ax.set_ylim([-1, 1])
+        ax.set_zlim([0, 2])
+
+        if smpl is not None:
+            ax = fig.add_subplot(122, projection="3d")
+            ax = visualize_pd_skeleton(ax, frame, smpl, skeleton, title=f"smpl_{title}")
+            ax.set_xlim([-1, 1])
+            ax.set_ylim([-1, 1])
+            ax.set_zlim([0, 2])
+
+
+        # Draw the figure
+        fig.canvas.draw()
+        
+        # Convert to an OpenCV compatible image using buffer_rgba()
+        img = np.array(fig.canvas.buffer_rgba())
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)  # Convert RGBA to BGR for OpenCV
+        
+        # Write the frame to video
+        video_writer.write(img)
+        counter += 1
+        if max_frames != -1 and counter >= max_frames:
+            break
+        
+    # Clean up
+    video_writer.release()
+    plt.close(fig)
+
+
+def calculate_smpl_vertical_offset():
+    """
+    calculate the veritcal offset of the skeleton so that the feet are on the ground
+    """
+    return 1.143336
+    smpl_model = smplx.create(
+        model_path=Path("/fs/nexus-projects/PhysicsFall/data/smpl/models"),
+        model_type="smpl",
+        return_verts=False,
+        batch_size = 1,
+    )
+
+    smpl_output = smpl_model(
+    )
+
+    # get the joints loc
+    smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
+    print(f'smpl joints loc: {smpl_joints_loc.shape}')
+    # get the SMPL joints (first 24 joints))
+    smpl_joints = smpl_joints_loc[ :24, :]
+    smpl_joint_order = get_SMPL_skeleton_names()
+    foot_joint_name = ["left_foot", "right_foot"]
+    idx = [smpl_joint_order.index(joint) for joint in foot_joint_name]
+    foot_pos = np.average(smpl_joints[idx, 1])
+    print(f'foot pos: {foot_pos}')
+    return -foot_pos
+
+def calculate_keypoint_vertical_offset():
+    return 0.825044
+    fk = ForwardKinematics(normalized_skeleton_path=normalize_skeleton_path)
+    dummy_input = torch.zeros(1, 66)
+    t_pose_joint_locs = fk.forward(dummy_input)
+    t_pose_df = fk.convert_to_dataframe(t_pose_joint_locs)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+    ax = visualize_pd_skeleton(ax, 0, t_pose_df)
+    ax.set_title("T-Pose")
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_zlim(-1, 1)
+    ax.view_init(elev=90, azim=0)
+    plt.savefig("t_pose.png")
+    print(f'left foot pos:')
+    print(t_pose_df[["LeftFoot_Xposition", "LeftFoot_Yposition", "LeftFoot_Zposition"]])
+    # get the right foot
+    print(f'right foot pos:')
+    print(t_pose_df[["RightFoot_Xposition", "RightFoot_Yposition", "RightFoot_Zposition"]])
+    print(f"LeftToeBase")
+    print(t_pose_df[["LeftToeBase_Xposition", "LeftToeBase_Yposition", "LeftToeBase_Zposition"]])
+    print(f"RightToeBase")
+    print(t_pose_df[["RightToeBase_Xposition", "RightToeBase_Yposition", "RightToeBase_Zposition"]])
+    # since this is swapped Y and Z axis. We calculate the average of the left and right foot in Y axis
+    # avg_offset = (t_pose_df["LeftFoot_Yposition"].iloc[0] + t_pose_df["RightFoot_Yposition"].iloc[0] + t_pose_df["LeftToeBase_Yposition"].iloc[0] +  t_pose_df["RightToeBase_Yposition"].iloc[0] ) / 4
+    avg_offset = (t_pose_df["LeftToeBase_Yposition"].iloc[0] +  t_pose_df["RightToeBase_Yposition"].iloc[0] ) / 2
+    print(f'avg offset: {avg_offset}')
+    return -avg_offset
+
+
 
 
 
 if __name__ == "__main__":
+    # # calculate the vertical offset
+    # calculate_keypoint_vertical_offset()
+    # exit()
     dataset_fps = 60
     target_fps = 30
     debug = False  # debug flag
@@ -556,6 +644,7 @@ if __name__ == "__main__":
 
     print(f"Found {len(aist_data)} AIST++ data files")
     for data_file in tqdm(aist_data, desc="Processing AIST++ data files"):
+        # data_file = Path("/fs/nexus-projects/PhysicsFall/data/AIST++/motions-SMPL/gBR_sFM_cAll_d04_mBR2_ch03.pkl")
         print(f"Processing {data_file}")
         data = np.load(data_file, allow_pickle=True)
 
@@ -576,6 +665,7 @@ if __name__ == "__main__":
         smpl_body_pose = poses[:, 3:]
         smpl_root_rot = poses[:, :3]
 
+
         smpl_root_rot = torch.tensor(smpl_root_rot, dtype=torch.float32)
         smpl_body_pose = torch.tensor(smpl_body_pose, dtype=torch.float32)
         smpl_root_trans = torch.tensor(root_trans, dtype=torch.float32)
@@ -590,8 +680,10 @@ if __name__ == "__main__":
         rotated_smpl_root_rot = torch.tensor(rotated_smpl_root_rot, dtype=torch.float32)
         # # Rotate the body translation as well
         rotated_root_trans = (smpl_rot_offset).apply(root_trans)
-        # rotated_root_trans += pelvis_offset
         rotated_root_trans = torch.tensor(rotated_root_trans, dtype=torch.float32)
+        # apply vertical offset so that it's on the ground
+        smpl_root_trans = rotated_root_trans.clone()
+        smpl_root_trans[:,1] += calculate_smpl_vertical_offset()
 
 
         smpl_model = smplx.create(
@@ -603,7 +695,7 @@ if __name__ == "__main__":
 
         smpl_output = smpl_model(
             body_pose=smpl_body_pose,
-            transl=rotated_root_trans,
+            transl=smpl_root_trans,
             global_orient=rotated_smpl_root_rot,
         )
 
@@ -638,7 +730,10 @@ if __name__ == "__main__":
         # convert from radian to degree
         keypoint_smpl_df = keypoint_smpl_df.apply(np.rad2deg)
         root_trans_df = pd.DataFrame(rotated_root_trans, columns=["Hips_Xposition", "Hips_Yposition", "Hips_Zposition"])
+        # add the root translation to the keypoint_smpl_df
+        root_trans_df["Hips_Zposition"] += calculate_keypoint_vertical_offset()
         keypoint_smpl_df = pd.concat([root_trans_df, keypoint_smpl_df], axis=1)
+        
 
 
         # save human pose
@@ -646,7 +741,7 @@ if __name__ == "__main__":
         smpl_output_file = output_dir / f"{data_file.stem}_smpl.pkl"
         smpl_data_dict = {
             "smpl_body_pose": smpl_body_pose,
-            "smpl_transl": rotated_root_trans,
+            "smpl_transl": smpl_root_trans,
             "smpl_global_orient": rotated_smpl_root_rot,
             "smpl_joint_loc": smpl_joints,
         }
@@ -659,39 +754,32 @@ if __name__ == "__main__":
 
         # TODO visualize a frame
         if debug:
+            # position_df= _motorica_forward_kinematics(keypoint_smpl_df)
+            # print(f'new position df: {position_df}')
+            # vis_frame = 0
+            # fig = plt.figure(figsize=(30, 10))
+            # ax_motorica = fig.add_subplot(131, projection="3d")
+            # ax_motorica = visualize_keypoint_data(ax_motorica, vis_frame, position_df)
+            
             position_df, motorica_dummy_data = motorica_forward_kinematics(keypoint_smpl_df)
+            print(f'new position df: \n{position_df}')
 
             vis_frame = 0
-            fig = plt.figure(figsize=(30, 10))
-            ax_motorica = fig.add_subplot(131, projection="3d")
-            ax_motorica = motorica_draw_stickfigure3d(
-                ax_motorica, motorica_dummy_data, vis_frame, data=position_df
-            )
+            fig = plt.figure(figsize=(20, 10))
+            ax_motorica = fig.add_subplot(121, projection="3d")
+            # ax_motorica = motorica_draw_stickfigure3d(
+            #     ax_motorica, motorica_dummy_data, vis_frame, data=position_df
+            # )
+            ax_motorica = visualize_keypoint_data(ax_motorica, vis_frame, position_df)
+
             ax_motorica.set_title("Motorica")
             ax_motorica.set_xlim(-1, 1)
             ax_motorica.set_ylim(-1, 1)
-            ax_motorica.set_zlim(-1, 1)
+            ax_motorica.set_zlim(0, 2)
             ax_motorica.set_xlabel("X")
             ax_motorica.set_ylabel("Y")
             ax_motorica.set_zlabel("Z")
             ax_motorica.scatter(0, 0, 0, c="red", s=10, marker="o")
-
-            ax_smpl = fig.add_subplot(132, projection="3d")
-            ax_smpl = SMPL_visulize_a_frame(
-                ax_smpl,
-                smpl_joints[vis_frame],
-                smpl_vertices[vis_frame],
-                smpl_model,
-            )
-            ax_smpl.set_title("SMPL")
-            ax_smpl.set_xlabel("X")
-            ax_smpl.set_ylabel("Y")
-            ax_smpl.set_zlabel("Z")
-            ax_smpl.set_xlim(-1, 1)
-            ax_smpl.set_ylim(-1, 1)
-            ax_smpl.set_zlim(-1, 1)
-
-
 
             # for debugging:
             
@@ -703,7 +791,7 @@ if __name__ == "__main__":
 
                 positions = positions.detach().cpu().numpy()
                 # check position shape
-                assert positions.shape[1] == 19, f"Expected position shape to be (num_frames, num_joints (19)), got {positions.shape}"
+                assert positions.shape[1] == 21, f"Expected position shape to be (num_frames, num_joints (21)), got {positions.shape}"
 
                 for j, joint in enumerate(get_motorica_skeleton_names()):
                     pos = positions[:, j]
@@ -716,9 +804,13 @@ if __name__ == "__main__":
             smpl_joints_loc = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
                 # swap from XYZ to ZXY
             smpl_joints_loc = smpl_joints_loc[:, :, [2, 0, 1]]
-            smpl_loc_df = convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 19, 3)))
-            smpl_loc_ax = fig.add_subplot(133, projection="3d")
-            smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, 30, smpl_loc_df)
+            print(f'rotated_root_trans: {rotated_root_trans}')
+            print(f'smpl joints root loc: {smpl_joints_loc[:, 0,:]}')
+            exit()
+            smpl_loc_df = convert_to_dataframe(positions=torch.tensor(smpl_joints_loc.reshape(-1, 21, 3)))
+            print(f'smpl loc df: \n{smpl_loc_df}')
+            smpl_loc_ax = fig.add_subplot(122, projection="3d")
+            smpl_loc_ax = visualize_keypoint_data(smpl_loc_ax, vis_frame, smpl_loc_df)
             smpl_loc_ax.set_title("SMPL data in keypoint format")
             smpl_loc_ax.set_xlabel("X")
             smpl_loc_ax.set_ylabel("Y")
@@ -726,12 +818,14 @@ if __name__ == "__main__":
 
             smpl_loc_ax.set_xlim(-1,1)
             smpl_loc_ax.set_ylim(-1, 1)
-            smpl_loc_ax.set_zlim(-1, 1)
+            smpl_loc_ax.set_zlim(0, 2)
             
 
-            ax_motorica.view_init(elev=0, azim=90)
-            ax_smpl.view_init(elev=0, azim=90)
-            smpl_loc_ax.view_init(elev=0, azim=90)
-            # fig.savefig(f"smpl_frame_{vis_frame:04d}.png")
-            save_video(position_df, smpl_loc_df, output_file_name=f"{data_file.stem}_motorica.mp4")
+            # ax_motorica.view_init(elev=0, azim=90)
+            # # ax_smpl.view_init(elev=0, azim=90)
+            # smpl_loc_ax.view_init(elev=0, azim=90)
+            # print(f'saving figure to {data_file.stem}_{vis_frame:04d}.png')
+            fig.savefig(f"./videos/{data_file.stem}_{vis_frame:04d}.png")
+            output_file_path = f"./videos/{data_file.stem}_{vis_frame:04d}.mp4"
+            create_video_from_keypoints(position_df, output_file_path, fps=30, title=data_file.stem, smpl = smpl_loc_df)
             exit()

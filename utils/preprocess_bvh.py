@@ -53,16 +53,16 @@ def parse_bvh_file(bvh_file_path: Path):
         "motion_positions_order": get_motorica_skeleton_names(),
     }
 
-    # fk = ForwardKinematics(skeleton, selected_joints=get_motorica_skeleton_names())
-    # motion_df = fk.convert_to_dataframe(motion_positions)
-    # fig = plt.figure(figsize=(10, 10))
-    # ax = fig.add_subplot(111, projection='3d')
-    # ax = visualize_keypoint_data(ax, 10, motion_df)
-    # ax.set_xlim([-1, 1])
-    # ax.set_ylim([-1, 1])
-    # ax.set_zlim([-1, 1])
-    # plt.savefig(f"{file_name}.png")
-    # exit()
+    fk = ForwardKinematics(skeleton, selected_joints=get_motorica_skeleton_names())
+    motion_df = fk.convert_to_dataframe(motion_positions)
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    ax = visualize_keypoint_data(ax, 10, motion_df)
+    ax.set_xlim([-1, 1])
+    ax.set_ylim([-1, 1])
+    ax.set_zlim([-1, 1])
+    plt.savefig(f"{file_name}.png")
+    exit()
     # root = "Hips"
     return data
 

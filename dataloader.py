@@ -1,5 +1,6 @@
 import sys, os
 import cv2
+
 sys.path.append("/fs/nexus-projects/PhysicsFall/")
 import pickle
 from pathlib import Path
@@ -10,9 +11,7 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from smpl2motorica.utils.pymo.preprocessing import (
-    MocapParameterizer
-)
+from smpl2motorica.utils.pymo.preprocessing import MocapParameterizer
 from smpl2motorica.utils.bvh import BVHParser
 from tqdm import tqdm
 from smpl2keypoint import (
@@ -28,7 +27,9 @@ from smpl2motorica.utils.keypoint_skeleton import get_keypoint_skeleton
 
 
 class AlignmentDataset(Dataset):
-    def __init__(self, data_dir, segment_length=50, force_reprocess=False, mode = "train"):
+    def __init__(
+        self, data_dir, segment_length=50, force_reprocess=False, mode="train"
+    ):
         self.mode = mode
         if mode not in ["train", "validate", "predict"]:
             raise ValueError("mode should be one of ['train', 'validate', 'predict']")
@@ -106,7 +107,7 @@ class AlignmentDataset(Dataset):
             keypoint_data = keypoint_data.reshape(sequence_length, -1, 3)
             keypoint_col = keypoint_df.columns
             return (keypoint_data, smpl_dict)
-        
+
         elif self.mode == "predict":
             # prcessing keypoint data
             keypoint_path = self.all_data[idx]
@@ -120,9 +121,9 @@ class AlignmentDataset(Dataset):
             ] + keypoint_order
             keypoint_data_df = keypoint_data_df[selected_col]
             # convert rotation from degree to radian
-            keypoint_data_df[keypoint_order] = keypoint_data_df[
-                keypoint_order
-            ].apply(lambda x: np.deg2rad(x))
+            keypoint_data_df[keypoint_order] = keypoint_data_df[keypoint_order].apply(
+                lambda x: np.deg2rad(x)
+            )
             keypoint_data = keypoint_data_df.values
             # padding zero to the longest sequence
             curr_sequence_length = len(keypoint_data)
@@ -135,29 +136,56 @@ class AlignmentDataset(Dataset):
             padding_mask[:curr_sequence_length] = 1
 
             # processing smpl data
-            smpl_path = keypoint_path.parent / (keypoint_path.stem.replace("_motorica", "_smpl") + ".pkl")
+            smpl_path = keypoint_path.parent / (
+                keypoint_path.stem.replace("_motorica", "_smpl") + ".pkl"
+            )
             with open(smpl_path, "rb") as f:
                 smpl_data = pickle.load(f)
             # padding to smpl data
             smpl_body_pose = np.concatenate(
-                [smpl_data["smpl_body_pose"], np.zeros((self.longest_length - curr_sequence_length, smpl_data["smpl_body_pose"].shape[1]))], axis=0
+                [
+                    smpl_data["smpl_body_pose"],
+                    np.zeros(
+                        (
+                            self.longest_length - curr_sequence_length,
+                            smpl_data["smpl_body_pose"].shape[1],
+                        )
+                    ),
+                ],
+                axis=0,
             )
             smpl_transl = np.concatenate(
-                [smpl_data["smpl_transl"], np.zeros((self.longest_length - curr_sequence_length, smpl_data["smpl_transl"].shape[1]))], axis=0)
+                [
+                    smpl_data["smpl_transl"],
+                    np.zeros(
+                        (
+                            self.longest_length - curr_sequence_length,
+                            smpl_data["smpl_transl"].shape[1],
+                        )
+                    ),
+                ],
+                axis=0,
+            )
             smpl_global_orient = np.concatenate(
-                [smpl_data["smpl_global_orient"], np.zeros((self.longest_length - curr_sequence_length, smpl_data["smpl_global_orient"].shape[1]))], axis=0
+                [
+                    smpl_data["smpl_global_orient"],
+                    np.zeros(
+                        (
+                            self.longest_length - curr_sequence_length,
+                            smpl_data["smpl_global_orient"].shape[1],
+                        )
+                    ),
+                ],
+                axis=0,
             )
             smpl_dict = {
                 "smpl_body_pose": smpl_body_pose,
                 "smpl_transl": smpl_transl,
                 "smpl_global_orient": smpl_global_orient,
                 "padding_mask": padding_mask,
-                "name": keypoint_path.stem
+                "name": keypoint_path.stem,
             }
             return (keypoint_data_padded, smpl_dict)
-
-
-
 
     def preprocess_one_pair(self, file_path):
         """
@@ -190,7 +218,9 @@ class AlignmentDataset(Dataset):
         # find corresponding keypoint file
         file_name = file_path.stem
         # replace _smpl.pkl with _motorica.pkl
-        keypoint_file = self.data_dir / (file_name.replace("_smpl", "_motorica") + ".pkl")
+        keypoint_file = self.data_dir / (
+            file_name.replace("_smpl", "_motorica") + ".pkl"
+        )
         if not keypoint_file.exists():
             raise FileNotFoundError(f"Keypoint file {keypoint_file} not found")
 
@@ -237,9 +267,9 @@ class AlignmentDataset(Dataset):
         ] + keypoint_order
         keypoint_data = keypoint_data[selected_col]
         # convert rotation from degree to radian
-        keypoint_data[keypoint_order] = keypoint_data[
-            keypoint_order
-        ].apply(lambda x: np.deg2rad(x))
+        keypoint_data[keypoint_order] = keypoint_data[keypoint_order].apply(
+            lambda x: np.deg2rad(x)
+        )
         keypoint_data.columns = ["keypoint_" + name for name in keypoint_data.columns]
         combined_df = pd.concat([keypoint_data, smpl_df], axis=1)
 
@@ -276,7 +306,6 @@ class AlignmentDataset(Dataset):
                 self.longest_length = len(data)
 
 
-
 class AlignmentDataModule(pl.LightningDataModule):
     def __init__(self, data_dir, batch_size, num_workers, mode):
         super(AlignmentDataModule, self).__init__()
@@ -290,17 +319,18 @@ class AlignmentDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         if self.mode == "train":
-            self.train_dataset = AlignmentDataset(self.data_dir,)
+            self.train_dataset = AlignmentDataset(
+                self.data_dir,
+            )
         elif self.mode == "validate":
             self.val_dataset = AlignmentDataset(self.data_dir, mode="validate")
         elif self.mode == "predict":
             self.predict_dataset = AlignmentDataset(self.data_dir, mode="predict")
-        
 
     def collate_fn(self, batch):
         # keypoint is a dataframe and smpl is a dict
         keypoint_batch, smpl_dict_batch = zip(*batch)
-        keypoint_stacked_batch  = torch.stack(
+        keypoint_stacked_batch = torch.stack(
             [torch.tensor(item, dtype=torch.float32) for item in keypoint_batch]
         )
         # for each key in the dict, stack the values
@@ -334,9 +364,9 @@ class AlignmentDataModule(pl.LightningDataModule):
                 "smpl_transl": smpl_transl,
                 "smpl_global_orient": smpl_global_orient,
                 "padding_mask": padding_mask,
-                "name": [item["name"] for item in smpl_dict_batch]
+                "name": [item["name"] for item in smpl_dict_batch],
             }
-        else:   
+        else:
             smpl_dict_batch = {
                 "smpl_body_pose": smpl_body_pose,
                 "smpl_transl": smpl_transl,
@@ -353,15 +383,16 @@ class AlignmentDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
         )
+
     def val_dataloader(self):
-        return  DataLoader(
+        return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=1,
             collate_fn=self.collate_fn,
         )
-    
+
     def predict_dataloader(self):
         return DataLoader(
             self.predict_dataset,
@@ -370,6 +401,7 @@ class AlignmentDataModule(pl.LightningDataModule):
             num_workers=1,
             collate_fn=self.collate_fn,
         )
+
     def get_dataloader(self):
         if self.mode == "train":
             return self.train_dataloader()
@@ -377,81 +409,79 @@ class AlignmentDataModule(pl.LightningDataModule):
             return self.val_dataloader()
         elif self.mode == "predict":
             return self.predict_dataloader()
-        
+
 
 def main():
-    data_dir = Path("/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset")
+    data_dir = Path(
+        "/fs/nexus-projects/PhysicsFall/smpl2motorica/data/alignment_dataset"
+    )
     smpl_model_path = Path("/fs/nexus-projects/PhysicsFall/data/smpl/models")
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory {data_dir} not found")
     if not smpl_model_path.exists():
         raise FileNotFoundError(f"SMPL model directory {smpl_model_path} not found")
-    
+
     dataset = AlignmentDataset(data_dir, segment_length=50, force_reprocess=True)
-    data_module = AlignmentDataModule(data_dir, batch_size=1, num_workers=1, mode="predict")
-    alighment_dataset  = data_module.get_dataloader()
-    print(f'len of alignment dataset: {len(alighment_dataset)}')
+    data_module = AlignmentDataModule(
+        data_dir, batch_size=1, num_workers=1, mode="predict"
+    )
+    alighment_dataset = data_module.get_dataloader()
+    print(f"len of alignment dataset: {len(alighment_dataset)}")
 
     for keypoint, smpl in alighment_dataset:
         smpl_batch = smpl
         keypoint_data = keypoint
         break
 
-    keypoint_fk = ForwardKinematics()
-    batch_size, len_of_sequence, _ ,_= keypoint_data.shape
-    print(f'batch_size: {batch_size}, len_of_sequence: {len_of_sequence}')
+    # keypoint_fk = ForwardKinematics()
+    # batch_size, len_of_sequence, _ ,_= keypoint_data.shape
+    # print(f'batch_size: {batch_size}, len_of_sequence: {len_of_sequence}')
 
-    # # processing SMPL data
-    pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
-    transl = smpl_batch["smpl_transl"].reshape(-1, 3)
-    global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
+    # # # processing SMPL data
+    # pose = smpl_batch["smpl_body_pose"].reshape(-1, 69)
+    # transl = smpl_batch["smpl_transl"].reshape(-1, 3)
+    # global_orient = smpl_batch["smpl_global_orient"].reshape(-1, 3)
 
-    smpl_model = smplx.create(
-        model_path=smpl_model_path,
-        model_type="smpl",
-        return_verts=True,
-        batch_size=len(pose),
-    )
-    debug_transl = torch.tensor([0,0.25,0], dtype=torch.float32).repeat(len(transl), 1)
-    smpl_output = smpl_model(
-        global_orient=torch.tensor(global_orient, dtype=torch.float32),
-        body_pose=torch.tensor(pose, dtype=torch.float32),
-        transl=torch.tensor(transl, dtype=torch.float32),
-        # transl = debug_transl,
-        # scaling = torch.tensor([0.1], dtype=torch.float32)
-    )
-    smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
-    smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
-    smpl_joints_loc = smpl_joints_loc[:, :24, :]
-    smpl_joint_names = get_SMPL_skeleton_names()
-    smpl_joints_loc_keypoint_order = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
-    # swap from XYZ to ZXY
-    smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order[:, :, [2, 0, 1]]
-    smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order.reshape(batch_size, -1, 19, 3)
+    # smpl_model = smplx.create(
+    #     model_path=smpl_model_path,
+    #     model_type="smpl",
+    #     return_verts=True,
+    #     batch_size=len(pose),
+    # )
+    # debug_transl = torch.tensor([0,0.25,0], dtype=torch.float32).repeat(len(transl), 1)
+    # smpl_output = smpl_model(
+    #     global_orient=torch.tensor(global_orient, dtype=torch.float32),
+    #     body_pose=torch.tensor(pose, dtype=torch.float32),
+    #     transl=torch.tensor(transl, dtype=torch.float32),
+    #     # transl = debug_transl,
+    #     # scaling = torch.tensor([0.1], dtype=torch.float32)
+    # )
+    # smpl_joints_loc = smpl_output.joints.detach().cpu().numpy().squeeze()
+    # smpl_vertices = smpl_output.vertices.detach().cpu().numpy().squeeze()
+    # smpl_joints_loc = smpl_joints_loc[:, :24, :]
+    # smpl_joint_names = get_SMPL_skeleton_names()
+    # smpl_joints_loc_keypoint_order = smpl_joints_loc[:, [smpl_joint_names.index(joint) for joint in motorica_to_smpl_mapping().values()],:]
+    # # swap from XYZ to ZXY
+    # smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order[:, :, [2, 0, 1]]
+    # smpl_joints_loc_keypoint_order = smpl_joints_loc_keypoint_order.reshape(batch_size, -1, 19, 3)
 
-    frame = 30
-    fig = plt.figure(figsize=(20, 10))
-    smpl_ax = fig.add_subplot(121, projection="3d")
-    SMPL_visulize_a_frame(smpl_ax, smpl_joints_loc[frame],smpl_vertices[frame], model = smpl_model)
-    smpl_ax.set_title("SMPL Model")
-    smpl_ax.set_xlim(-1,1)
-    smpl_ax.set_ylim(-1,1)
-    smpl_ax.set_zlim(-1,1)
-    smpl_ax.view_init(-90, 0)
+    # frame = 30
+    # fig = plt.figure(figsize=(20, 10))
+    # smpl_ax = fig.add_subplot(121, projection="3d")
+    # SMPL_visulize_a_frame(smpl_ax, smpl_joints_loc[frame],smpl_vertices[frame], model = smpl_model)
+    # smpl_ax.set_title("SMPL Model")
+    # smpl_ax.set_xlim(-1,1)
+    # smpl_ax.set_ylim(-1,1)
+    # smpl_ax.set_zlim(-1,1)
+    # smpl_ax.view_init(-90, 0)
 
-    keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
-    print(keypoint_data_loc.shape)
-    # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
-    # keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
+    # keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
+    # print(keypoint_data_loc.shape)
+    # # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
+    # # keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
 
+    # fig.savefig("debug.png")
 
-
-    fig.savefig("debug.png")
-
-
-
-
-    
     # keypoint_data_loc = keypoint_fk.forward(keypoint_data.reshape(-1, 60))
     # keypoint_position = keypoint_data_loc.reshape(batch_size, len_of_sequence, -1, 3)
     # keypoint_position = keypoint_fk.convert_to_dataframe(keypoint_position.reshape(-1, 19, 3))
@@ -479,7 +509,7 @@ def main():
     # image_folder = 'tmp'
     # os.makedirs(image_folder, exist_ok=True)
     # for frame in tqdm(range(len_of_sequence), desc="Visualizing frames"):
-        
+
     #     fig = plt.figure(figsize=(20, 10))
     #     input_loc_ax = fig.add_subplot(121, projection="3d")
     #     input_loc_ax = visualize_keypoint_data(input_loc_ax, frame, keypoint_position)
@@ -514,13 +544,11 @@ def main():
 
     # cv2.destroyAllWindows()
     # video.release()
-    
+
     # # remove the images and directory
     # for image in images:
     #     os.remove(os.path.join(image_folder, image))
     # os.rmdir(image_folder)
-
-
 
 
 if __name__ == "__main__":
