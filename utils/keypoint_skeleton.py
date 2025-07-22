@@ -2,7 +2,8 @@ import pickle
 import os
 from pathlib import Path
 
-script_dir = Path(os.path.dirname(os.path.realpath(__file__)))
+# script_dir = Path(os.path.dirname(os.path.realpath(__file__)))
+script_dir = Path('./data')
 if not os.path.exists(script_dir / "normalized_skeleton.pkl"):
     raise FileNotFoundError("normalized_skeleton.pkl not found. Please run the script 'normalize_skeleton.py' to generate it.")
 

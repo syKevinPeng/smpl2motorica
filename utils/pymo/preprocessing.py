@@ -8,11 +8,13 @@ Created on June 12, 2017
 from pathlib import Path
 import sys
 
+sys.path.append(str(Path(__file__).parent.parent))
 # chech if the path is correct
-path = Path(r"/fs/nexus-projects/PhysicsFall/smpl2motorica/utils")
-if not path.exists():
-    print(f"Path {path} does not exist")
-sys.path.append(str(path))
+# path = Path(r"/fs/nexus-projects/PhysicsFall/smpl2motorica/utils")
+# path = Path(r"/")
+# if not path.exists():
+#     print(f"Path {path} does not exist")
+# sys.path.append(str(path))
 
 import copy
 import pandas as pd
